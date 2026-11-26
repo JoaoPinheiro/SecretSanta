@@ -1,0 +1,13 @@
+year,giver_id,recipient_id
+2024,ana,diego
+2024,bruno,eva
+2024,carla,felix
+2024,diego,bruno
+2024,eva,carla
+2024,felix,ana
+2025,ana,carla
+2025,bruno,diego
+2025,carla,eva
+2025,diego,felix
+2025,eva,ana
+2025,felix,

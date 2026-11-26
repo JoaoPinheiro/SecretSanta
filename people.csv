@@ -1,0 +1,8 @@
+id,name,email,phone,active
+ana,Ana,ana@example.com,,true
+bruno,Bruno,bruno@example.com,,true
+carla,Carla,carla@example.com,,true
+diego,Diego,diego@example.com,,true
+eva,Eva,eva@example.com,,true
+felix,Felix,felix@example.com,,true
+gabriela,Gabriela,gabriela@example.com,,false

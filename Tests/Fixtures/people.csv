@@ -1,0 +1,8 @@
+id,name,email,phone,active
+alex,Alex,alex@example.com,,true
+blair,Blair,blair@example.com,+490001234,true
+casey,Casey,casey@example.com,,true
+drew,Drew,drew@example.com,,true
+ellis,Ellis,ellis@example.com,,true
+frankie,Frankie,frankie@example.com,,true
+gale,Gale,,,false
