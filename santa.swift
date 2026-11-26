@@ -145,7 +145,7 @@ func runSending(at directory: URL, year: Int, sender: String,
     try checkSender()
     output("Sender: \(sender)\nPending messages: \(messages.count)")
     for message in messages {
-        output("\nTo: \(message.address)\nSubject: \(message.subject)\n\n\(message.body)")
+        output("\nTo: \(message.address)\nSubject: \(message.subject)")
     }
     guard confirm("Send these \(messages.count) messages from \(sender)? [y/N]") else {
         output("Sending cancelled. No emails sent.")
@@ -515,8 +515,8 @@ func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [His
 
 func main() throws {
     let arguments = Array(CommandLine.arguments.dropFirst())
-    guard arguments.isEmpty || arguments == ["--send"] else {
-        throw InputError("Usage: swift santa.swift [--send]")
+    guard arguments.isEmpty || arguments == ["--send"] || arguments == ["--show-matches"] else {
+        throw InputError("Usage: swift santa.swift [--send | --show-matches]")
     }
     let directory = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
     if arguments == ["--send"] {
@@ -546,6 +546,7 @@ func main() throws {
     print(changed ? "Imported history saved to history.json." : "History unchanged.")
     let names = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0.name) })
     func showAssignments(_ assignments: [String: String]) {
+        guard arguments == ["--show-matches"] else { return }
         for giver in assignments.keys.sorted() {
             let recipient = assignments[giver]!
             print("\(names[giver]!) → \(names[recipient]!)")
@@ -565,7 +566,7 @@ func main() throws {
     }
     try validateAssignments(assignments, participants: participants, memberships: memberships,
                             history: history, year: drawYear)
-    print("Proposed matches for \(drawYear):")
+    print("Draw generated for \(drawYear).")
     showAssignments(assignments)
     guard askYesNo("Save this draw for \(drawYear)? [y/N]") else {
         print("New matches were not saved. No emails sent.")

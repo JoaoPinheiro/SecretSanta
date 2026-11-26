@@ -108,6 +108,10 @@ func runMailTests() throws {
             return confirmed
         }, output: { output.append($0) })
         try expect(submitted.map(\.giverID) == ["blair", "casey"], "Wrong batch submitted.")
+        for message in submitted {
+            try expect(!message.body.isEmpty, "Submitted email has no body.")
+            try expect(!output.joined(separator: "\n").contains(message.body), "Send preview revealed an email body.")
+        }
         try expect(Set(try history()[String(year)]!.submittedEmails) == Set(["alex", "blair", "casey"]), "Submissions not recorded.")
         var rerunCalls = 0
         try runSending(at: temporary, year: year, sender: dedicatedSender,

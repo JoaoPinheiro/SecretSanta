@@ -300,7 +300,8 @@ func runTests() throws {
         }),
         ("EOF leaves preview unsaved", {
             let output = try check()
-            try require(output.contains("Proposed matches for 2026:"), output)
+            try require(output.contains("Draw generated for 2026."), output)
+            try require(!output.contains(" → "), "Default output revealed matches.")
             try require(output.contains("Save this draw for 2026? [y/N]"), output)
             try require(output.contains("New matches were not saved"), output)
             try require(try readHistory()["2026"] == nil, "Preview was saved.")
@@ -313,6 +314,7 @@ func runTests() throws {
             try replace("history.json", "2023", "2026")
             let output = try check(input: "yes\n")
             try require(output.contains("A draw already exists for 2026"), output)
+            try require(!output.contains(" → "), "Default output revealed saved matches.")
             try require(!output.contains("Proposed matches"), output)
             try require(!output.contains("Save this draw"), output)
         }),
@@ -328,7 +330,7 @@ func runTests() throws {
         ("confirmation saves exactly the reviewed assignments", {
             try check()
             let before = try Data(contentsOf: temporary.appendingPathComponent("history.json"))
-            let output = try check(input: "yes\n")
+            let output = try check(input: "yes\n", arguments: ["--show-matches"])
             try require(output.contains("Draw for 2026 saved to history.json"), output)
             let records = try readHistory()
             let assignments = records["2026"]?["assignments"] as? [String: String] ?? [:]
@@ -357,7 +359,7 @@ func runTests() throws {
             try require(before == persistedSnapshot(), "Rerun rewrote the draw or backup.")
             try replace("people.csv", "alex,Alex,alex@example.com,,true", "alex,Alexander,new@example.com,,false")
             try replace("families.csv", "household-1,alex", "household-1,alex\nhousehold-2,alex\nhousehold-3,alex")
-            let output = try check()
+            let output = try check(arguments: ["--show-matches"])
             try require(output.contains("Alexander → "), "Saved participant disappeared after deactivation.")
             try require(before == persistedSnapshot(), "Contact or family edits changed saved assignments.")
         }),
@@ -404,7 +406,7 @@ func runTests() throws {
             try require(before == persistedSnapshot(), "Completed batch changed on rerun.")
         }),
         ("unsupported arguments are rejected", {
-            try check(error: "Usage: swift santa.swift [--send]", arguments: ["--other"])
+            try check(error: "Usage: swift santa.swift [--send | --show-matches]", arguments: ["--other"])
         }),
     ]
     var failures = 0
