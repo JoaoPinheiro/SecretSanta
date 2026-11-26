@@ -76,10 +76,10 @@ func runTests() throws {
         return result
     }
     @discardableResult
-    func check(error: String? = nil, input: String = "") throws -> String {
+    func check(error: String? = nil, input: String = "", arguments: [String] = []) throws -> String {
         let before = try snapshot()
         let persistedBefore = try persistedSnapshot()
-        let result = try execute(binary, input: input)
+        let result = try execute(binary, arguments, input: input)
         try require(result.status == (error == nil ? 0 : 1), "Unexpected exit status: \(result.output)")
         if let error { try require(result.output.contains(error), "Expected '\(error)', got: \(result.output)") }
         try require(before == snapshot(), "Input files changed.")
@@ -121,7 +121,7 @@ func runTests() throws {
             let output = try check()
             try require(output.contains("7 people, 6 active, 3 family groups"), output)
             try require(output.contains("2025: 6 participants, 6 assignments."), output)
-            try require(output.contains("Alex [alex]"), output)
+            try require(output.contains("Active participants: Alex,"), output)
         }),
         ("quoted fields, escaped quotes, BOM, and CRLF", {
             try replace("people.csv", "alex,Alex,", "alex,\"Alex, \"\"Al\"\"\nSmith\",")
@@ -129,7 +129,7 @@ func runTests() throws {
             let text = try String(contentsOf: path, encoding: .utf8)
             try ("\u{FEFF}" + text.replacingOccurrences(of: "\n", with: "\r\n")).write(to: path, atomically: true, encoding: .utf8)
             let output = try check()
-            try require(output.contains("Alex, \"Al\"\nSmith [alex]"), output)
+            try require(output.contains("Alex, \"Al\"\nSmith"), output)
         }),
         ("duplicate person", {
             try replace("people.csv", "blair,Blair", "alex,Blair")
@@ -334,8 +334,12 @@ func runTests() throws {
                         && Set(assignments.values) == Set(participants), "Saved draw is incomplete.")
             let lines = output.components(separatedBy: "\n").filter { $0.contains(" → ") }
             try require(lines.count == assignments.count, "Saved count differs from preview.")
+            // These fixture rows are unquoted; the CSV parser is tested separately.
+            let contactRows = try String(contentsOf: fixtures.appendingPathComponent("people.csv"), encoding: .utf8)
+                .split(separator: "\n").dropFirst().map { $0.split(separator: ",", omittingEmptySubsequences: false) }
+            let names = Dictionary(uniqueKeysWithValues: contactRows.map { (String($0[0]), String($0[1])) })
             for (giver, recipient) in assignments {
-                try require(lines.contains { $0.contains("[\(giver)] → ") && $0.hasSuffix("[\(recipient)]") },
+                try require(lines.contains("\(names[giver]!) → \(names[recipient]!)"),
                             "Saved assignment differs from preview.")
             }
             try require((records["2026"]?["submittedEmails"] as? [String]) == [], "New draw marked as sent.")
@@ -351,7 +355,7 @@ func runTests() throws {
             try replace("people.csv", "alex,Alex,alex@example.com,,true", "alex,Alexander,new@example.com,,false")
             try replace("families.csv", "household-1,alex", "household-1,alex\nhousehold-2,alex\nhousehold-3,alex")
             let output = try check()
-            try require(output.contains("Alexander [alex] → "), "Saved participant disappeared after deactivation.")
+            try require(output.contains("Alexander → "), "Saved participant disappeared after deactivation.")
             try require(before == persistedSnapshot(), "Contact or family edits changed saved assignments.")
         }),
         ("saving failure leaves new draw absent", {
@@ -369,6 +373,24 @@ func runTests() throws {
             try replace("history.csv", "year,giver_id,recipient_id\n",
                         "year,giver_id,recipient_id\n2026,drew,ellis\n2026,ellis,frankie\n2026,frankie,drew\n")
             try check(error: "importing changes to it is not allowed")
+        }),
+        ("send requires a saved draw and never imports CSV", {
+            try check(error: "No saved draw for 2026", arguments: ["--send"])
+            try require(persistedSnapshot().isEmpty, "Send mode imported history.")
+        }),
+        ("send previews only and ignores family and history CSV", {
+            try check(input: "yes\n")
+            let before = try persistedSnapshot()
+            try "invalid CSV".write(to: temporary.appendingPathComponent("families.csv"), atomically: true, encoding: .utf8)
+            try "invalid CSV".write(to: temporary.appendingPathComponent("history.csv"), atomically: true, encoding: .utf8)
+            let output = try check(input: "yes\n", arguments: ["--send"])
+            try require(output.contains("Pending messages: 6"), output)
+            try require(output.contains("real email sending is disabled"), output)
+            try require(!output.contains("Proposed matches") && !output.contains("Save this draw"), output)
+            try require(before == persistedSnapshot(), "Send preview changed persisted files.")
+        }),
+        ("unsupported arguments are rejected", {
+            try check(error: "Usage: swift santa.swift [--send]", arguments: ["--other"])
         }),
     ]
     var failures = 0
@@ -399,6 +421,19 @@ func runTests() throws {
     let matchingResult = try execute(matchingBinary, [fixtures.path])
     print(matchingResult.output, terminator: "")
     try require(matchingResult.status == 0, "Matching tests failed.")
+
+    let mailSource = temporary.appendingPathComponent("mail-tests.swift")
+    let mailTests = try String(contentsOf: tests.appendingPathComponent("MailTests.swift"), encoding: .utf8)
+    try (production + "\n" + mailTests).write(to: mailSource, atomically: true, encoding: .utf8)
+    let mailBinary = temporary.appendingPathComponent("mail-tests")
+    let mailCompile = try execute(URL(fileURLWithPath: "/usr/bin/xcrun"), [
+        "swiftc", "-D", "TESTING", "-module-cache-path", temporary.appendingPathComponent("cache").path,
+        mailSource.path, "-o", mailBinary.path,
+    ])
+    try require(mailCompile.status == 0, mailCompile.output)
+    let mailResult = try execute(mailBinary, [fixtures.path])
+    print(mailResult.output, terminator: "")
+    try require(mailResult.status == 0, "Mail tests failed.")
 }
 
 do { try runTests() }

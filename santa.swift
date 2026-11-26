@@ -3,6 +3,13 @@ import Foundation
 
 // Annual configuration. Saving a new draw requires explicit confirmation.
 let drawYear = 2026
+let senderEmail = "secret-santa@example.com" // Replace with the dedicated Apple Mail address.
+let eventNote = "Please keep your assignment secret!"
+
+func emailSubject(year: Int) -> String { "Secret Santa — \(year)" }
+func emailBody(giver: String, recipient: String) -> String {
+    "Hi \(giver),\n\nThis year, you’re buying a gift for \(recipient).\n\n\(eventNote)\n"
+}
 
 struct InputError: Error, CustomStringConvertible {
     let description: String
@@ -36,6 +43,88 @@ struct AnnualHistory: Codable, Equatable {
 }
 
 typealias History = [String: AnnualHistory]
+
+struct PreparedEmail {
+    let giverID: String
+    let sender: String
+    let address: String
+    let subject: String
+    let body: String
+}
+
+func prepareEmails(people: [Person], history: History, year: Int, sender: String) throws -> [PreparedEmail] {
+    try validateHistory(history, personIDs: Set(people.map(\.id)))
+    guard let draw = history[String(year)] else {
+        throw InputError("No saved draw for \(year). Generate and save it before preparing emails.")
+    }
+    // Check the saved draw's structure, without applying today's groups or active flags.
+    try validateAssignments(draw.assignments, participants: draw.participants,
+                            memberships: [], history: [:], year: year)
+    func validAddress(_ address: String) -> Bool {
+        address.range(of: #"^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$"#, options: .regularExpression) != nil
+    }
+    guard validAddress(sender) else { throw InputError("Configure a valid dedicated senderEmail address.") }
+    let contacts = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0) })
+    return try draw.participants.sorted().filter { !draw.submittedEmails.contains($0) }.map { giver in
+        let person = contacts[giver]!
+        guard validAddress(person.email) else {
+            throw InputError("\(person.name) [\(giver)] needs a valid email address before sending.")
+        }
+        let recipient = contacts[draw.assignments[giver]!]!
+        return PreparedEmail(giverID: giver, sender: sender, address: person.email,
+                             subject: emailSubject(year: year), body: emailBody(giver: person.name, recipient: recipient.name))
+    }
+}
+
+func submitEmails(_ messages: [PreparedEmail], history: History, year: Int, to url: URL,
+                  submit: (PreparedEmail) throws -> Void) throws {
+    var progress = history
+    for message in messages {
+        do {
+            try submit(message)
+            var updated = progress
+            updated[String(year)]!.submittedEmails.append(message.giverID)
+            _ = try saveHistory(updated, replacing: progress, to: url)
+            progress = updated
+        } catch {
+            throw InputError("Stopped while sending to \(message.address): \(error). Check Mail before retrying; a message may have been submitted before its status was saved.")
+        }
+    }
+}
+
+func askYesNo(_ prompt: String) -> Bool {
+    print(prompt)
+    let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return answer == "y" || answer == "yes"
+}
+
+func runSending(at directory: URL, year: Int, sender: String,
+                submit: ((PreparedEmail) throws -> Void)? = nil,
+                confirm: (String) -> Bool = askYesNo,
+                output: (String) -> Void = { print($0) }) throws {
+    let people = try loadPeople(at: directory, requireActiveEmails: false)
+    let url = directory.appendingPathComponent("history.json")
+    let history = try loadHistory(from: url, personIDs: Set(people.map(\.id)))
+    let messages = try prepareEmails(people: people, history: history, year: year, sender: sender)
+    guard !messages.isEmpty else {
+        output("All messages for \(year) are already recorded as submitted. Nothing to send.")
+        return
+    }
+    output("Sender: \(sender)\nPending messages: \(messages.count)")
+    for message in messages {
+        output("\nTo: \(message.address)\nSubject: \(message.subject)\n\n\(message.body)")
+    }
+    guard let submit else {
+        output("Preview only: real email sending is disabled in this step. Nothing sent or changed.")
+        return
+    }
+    guard confirm("Send these \(messages.count) messages from \(sender)? [y/N]") else {
+        output("Sending cancelled. No emails sent.")
+        return
+    }
+    try submitEmails(messages, history: history, year: year, to: url, submit: submit)
+    output("Recorded \(messages.count) submissions. Submission does not confirm delivery.")
+}
 
 struct DrawRestrictions {
     var eligible: [String: Set<String>]
@@ -327,7 +416,7 @@ func readCSV(_ url: URL, headers: [String], optional: Bool = false) throws -> [C
     return Array(rows.dropFirst())
 }
 
-func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [HistoricalAssignment]) {
+func loadPeople(at directory: URL, requireActiveEmails: Bool = true) throws -> [Person] {
     func failure(_ file: String, _ row: CSVRow, _ message: String) -> InputError {
         InputError("\(file):\(row.line): \(message)")
     }
@@ -340,10 +429,20 @@ func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [His
         guard !f[0].isEmpty, !f[1].isEmpty else { throw failure("people.csv", row, "ID and name are required.") }
         guard personIDs.insert(f[0]).inserted else { throw failure("people.csv", row, "Duplicate person ID '\(f[0])'.") }
         guard f[4] == "true" || f[4] == "false" else { throw failure("people.csv", row, "active must be true or false.") }
-        guard f[4] == "false" || !f[2].isEmpty else { throw failure("people.csv", row, "Active participants require an email address.") }
+        guard !requireActiveEmails || f[4] == "false" || !f[2].isEmpty else { throw failure("people.csv", row, "Active participants require an email address.") }
         people.append(Person(id: f[0], name: f[1], email: f[2], phone: f[3].isEmpty ? nil : f[3], active: f[4] == "true"))
     }
 
+    return people
+}
+
+func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [HistoricalAssignment]) {
+    let people = try loadPeople(at: directory)
+    let personIDs = Set(people.map(\.id))
+    func failure(_ file: String, _ row: CSVRow, _ message: String) -> InputError {
+        InputError("\(file):\(row.line): \(message)")
+    }
+    func clean(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines) }
     var memberships: [FamilyMembership] = []
     var membersByGroup: [String: Set<String>] = [:]
     for row in try readCSV(directory.appendingPathComponent("families.csv"), headers: ["group", "person_id"]) {
@@ -386,10 +485,15 @@ func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [His
 }
 
 func main() throws {
-    guard CommandLine.arguments.count == 1 else {
-        throw InputError("Usage: swift santa.swift (generate, review, and save; sending is not implemented yet)")
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    guard arguments.isEmpty || arguments == ["--send"] else {
+        throw InputError("Usage: swift santa.swift [--send]")
     }
     let directory = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
+    if arguments == ["--send"] {
+        try runSending(at: directory, year: drawYear, sender: senderEmail)
+        return
+    }
     let (people, memberships, imports) = try loadInputs(at: directory)
     let personIDs = Set(people.map(\.id))
     let historyURL = directory.appendingPathComponent("history.json")
@@ -432,9 +536,7 @@ func main() throws {
                             history: history, year: drawYear)
     print("Proposed matches for \(drawYear):")
     showAssignments(assignments)
-    print("Save this draw for \(drawYear)? [y/N]")
-    let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    guard answer == "y" || answer == "yes" else {
+    guard askYesNo("Save this draw for \(drawYear)? [y/N]") else {
         print("New matches were not saved. No emails sent.")
         return
     }
