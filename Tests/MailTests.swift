@@ -72,14 +72,20 @@ func runMailTests() throws {
         let pending = try messages()
         try expect(pending[0].address == "new@example.com" && pending[0].body.contains("Hi Blair Updated,"), "Current contact was ignored.")
     }
+    try test("failed account check stops before confirmation or submission") {
+        let before = try Data(contentsOf: historyURL)
+        var confirmationRequested = false
+        var called = false
+        try rejects("Account unavailable") {
+            try runSending(at: temporary, year: year, sender: dedicatedSender,
+                           submit: { _ in called = true }, checkSender: { throw InputError("Account unavailable") },
+                           confirm: { _ in confirmationRequested = true; return true }, output: { _ in })
+        }
+        try expect(!confirmationRequested && !called, "Failed account check continued sending.")
+        try expect(Data(contentsOf: historyURL) == before, "Account check changed history.")
+    }
     try test("preview and decline never invoke sender or change history") {
         let before = try Data(contentsOf: historyURL)
-        var output: [String] = []
-        var confirmationRequested = false
-        try runSending(at: temporary, year: year, sender: dedicatedSender,
-                       confirm: { _ in confirmationRequested = true; return true }, output: { output.append($0) })
-        try expect(!confirmationRequested, "Disabled sender requested confirmation.")
-        try expect(output.last!.contains("disabled"), "Disabled sender was not disclosed.")
         var called = false
         try runSending(at: temporary, year: year, sender: dedicatedSender,
                        submit: { _ in called = true }, confirm: { _ in false }, output: { _ in })
@@ -150,6 +156,25 @@ func runMailTests() throws {
         saved[String(year)]!.assignments = ["alex": "blair", "blair": "alex", "casey": "casey"]
         try write(saved)
         try rejects("self-assignment or reciprocal pair") { _ = try messages() }
+    }
+    try test("AppleScript adapter preserves literal message arguments") {
+        let adapter = AppleMailSender(scriptURL: fixtures.appendingPathComponent("check-mail-arguments.applescript"))
+        try adapter.submit(PreparedEmail(giverID: "alex", sender: dedicatedSender,
+                                        address: "recipient@example.com", subject: "Secret Santa — \"family\"",
+                                        body: "Hi \"Alex\",\nLiteral $(echo unsafe); `echo unsafe` & backslash: \\"))
+    }
+    try test("AppleScript adapter checks responses and propagates failures") {
+        let adapter = AppleMailSender(scriptURL: fixtures.appendingPathComponent("fake-send.applescript"))
+        try adapter.check(sender: dedicatedSender)
+        try rejects("Dedicated account not found") { try adapter.check(sender: "missing@example.com") }
+        for address in ["failure@example.com", "unconfirmed@example.com"] {
+            try rejects("Apple Mail helper failed") {
+                try adapter.submit(PreparedEmail(giverID: "alex", sender: dedicatedSender,
+                                                address: address, subject: "Test", body: "Test"))
+            }
+        }
+        let missing = AppleMailSender(scriptURL: temporary.appendingPathComponent("absent.applescript"))
+        try rejects("Cannot read Apple Mail helper") { try missing.check(sender: dedicatedSender) }
     }
     print("\(count) mail tests passed; no real emails sent.")
 }

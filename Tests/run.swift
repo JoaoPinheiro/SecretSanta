@@ -34,7 +34,7 @@ func runTests() throws {
     let fm = FileManager.default
     let tests = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
     let fixtures = tests.appendingPathComponent("Fixtures")
-    for name in ["people.csv", "families.csv", "history.csv", "saved-history.json", "matching.json"] {
+    for name in ["people.csv", "families.csv", "history.csv", "saved-history.json", "matching.json", "fake-send.applescript", "check-mail-arguments.applescript"] {
         try require(fm.isReadableFile(atPath: fixtures.appendingPathComponent(name).path),
                     "Missing required test fixture: Tests/Fixtures/\(name). Restore it before running tests.")
     }
@@ -44,6 +44,9 @@ func runTests() throws {
     let source = temporary.appendingPathComponent("santa.swift")
     let binary = temporary.appendingPathComponent("santa")
     try fm.copyItem(at: tests.deletingLastPathComponent().appendingPathComponent("santa.swift"), to: source)
+    // The CLI executable can only reach this harmless helper, never the real Mail adapter.
+    try fm.copyItem(at: fixtures.appendingPathComponent("fake-send.applescript"),
+                    to: temporary.appendingPathComponent("send.applescript"))
     let compiled = try execute(URL(fileURLWithPath: "/usr/bin/xcrun"), [
         "swiftc", "-module-cache-path", temporary.appendingPathComponent("cache").path,
         source.path, "-o", binary.path,
@@ -378,16 +381,27 @@ func runTests() throws {
             try check(error: "No saved draw for 2026", arguments: ["--send"])
             try require(persistedSnapshot().isEmpty, "Send mode imported history.")
         }),
-        ("send previews only and ignores family and history CSV", {
+        ("declined sending ignores family and history CSV", {
             try check(input: "yes\n")
             let before = try persistedSnapshot()
             try "invalid CSV".write(to: temporary.appendingPathComponent("families.csv"), atomically: true, encoding: .utf8)
             try "invalid CSV".write(to: temporary.appendingPathComponent("history.csv"), atomically: true, encoding: .utf8)
-            let output = try check(input: "yes\n", arguments: ["--send"])
+            let output = try check(input: "no\n", arguments: ["--send"])
             try require(output.contains("Pending messages: 6"), output)
-            try require(output.contains("real email sending is disabled"), output)
+            try require(output.contains("Sending cancelled"), output)
             try require(!output.contains("Proposed matches") && !output.contains("Save this draw"), output)
             try require(before == persistedSnapshot(), "Send preview changed persisted files.")
+        }),
+        ("CLI records fake submissions only after confirmation", {
+            try check(input: "yes\n")
+            let output = try check(input: "yes\n", arguments: ["--send"])
+            try require(output.contains("Recorded 6 submissions"), output)
+            try require((try readHistory()["2026"]?["submittedEmails"] as? [String])?.count == 6,
+                        "CLI did not record submissions.")
+            let before = try persistedSnapshot()
+            let rerun = try check(input: "yes\n", arguments: ["--send"])
+            try require(rerun.contains("Nothing to send"), rerun)
+            try require(before == persistedSnapshot(), "Completed batch changed on rerun.")
         }),
         ("unsupported arguments are rejected", {
             try check(error: "Usage: swift santa.swift [--send]", arguments: ["--other"])

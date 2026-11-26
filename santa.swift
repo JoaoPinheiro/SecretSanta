@@ -52,6 +52,37 @@ struct PreparedEmail {
     let body: String
 }
 
+struct AppleMailSender {
+    let scriptURL: URL
+
+    private func invoke(_ arguments: [String], expecting response: String) throws {
+        guard FileManager.default.isReadableFile(atPath: scriptURL.path) else {
+            throw InputError("Cannot read Apple Mail helper: \(scriptURL.path)")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = [scriptURL.path] + arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard process.terminationStatus == 0, output == response else {
+            throw InputError("Apple Mail helper failed: \(output.isEmpty ? "no success response" : output)")
+        }
+    }
+
+    func check(sender: String) throws {
+        try invoke(["check", sender], expecting: "READY")
+    }
+
+    func submit(_ message: PreparedEmail) throws {
+        try invoke(["send", message.sender, message.address, message.subject, message.body], expecting: "SUBMITTED")
+    }
+}
+
 func prepareEmails(people: [Person], history: History, year: Int, sender: String) throws -> [PreparedEmail] {
     try validateHistory(history, personIDs: Set(people.map(\.id)))
     guard let draw = history[String(year)] else {
@@ -99,7 +130,8 @@ func askYesNo(_ prompt: String) -> Bool {
 }
 
 func runSending(at directory: URL, year: Int, sender: String,
-                submit: ((PreparedEmail) throws -> Void)? = nil,
+                submit: (PreparedEmail) throws -> Void,
+                checkSender: () throws -> Void = {},
                 confirm: (String) -> Bool = askYesNo,
                 output: (String) -> Void = { print($0) }) throws {
     let people = try loadPeople(at: directory, requireActiveEmails: false)
@@ -110,13 +142,10 @@ func runSending(at directory: URL, year: Int, sender: String,
         output("All messages for \(year) are already recorded as submitted. Nothing to send.")
         return
     }
+    try checkSender()
     output("Sender: \(sender)\nPending messages: \(messages.count)")
     for message in messages {
         output("\nTo: \(message.address)\nSubject: \(message.subject)\n\n\(message.body)")
-    }
-    guard let submit else {
-        output("Preview only: real email sending is disabled in this step. Nothing sent or changed.")
-        return
     }
     guard confirm("Send these \(messages.count) messages from \(sender)? [y/N]") else {
         output("Sending cancelled. No emails sent.")
@@ -491,7 +520,9 @@ func main() throws {
     }
     let directory = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
     if arguments == ["--send"] {
-        try runSending(at: directory, year: drawYear, sender: senderEmail)
+        let mail = AppleMailSender(scriptURL: directory.appendingPathComponent("send.applescript"))
+        try runSending(at: directory, year: drawYear, sender: senderEmail,
+                       submit: mail.submit, checkSender: { try mail.check(sender: senderEmail) })
         return
     }
     let (people, memberships, imports) = try loadInputs(at: directory)
