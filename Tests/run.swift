@@ -34,7 +34,7 @@ func runTests() throws {
     let fm = FileManager.default
     let tests = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
     let fixtures = tests.appendingPathComponent("Fixtures")
-    for name in ["people.csv", "families.csv", "history.csv", "saved-history.json", "matching.json", "fake-send.applescript", "check-mail-arguments.applescript"] {
+    for name in ["people.csv", "groups.csv", "history.csv", "saved-history.json", "matching.json", "fake-send.applescript", "check-mail-arguments.applescript"] {
         try require(fm.isReadableFile(atPath: fixtures.appendingPathComponent(name).path),
                     "Missing required test fixture: Tests/Fixtures/\(name). Restore it before running tests.")
     }
@@ -53,7 +53,7 @@ func runTests() throws {
     ])
     try require(compiled.status == 0, "Compilation failed:\n\(compiled.output)")
 
-    let files = ["people.csv", "families.csv", "history.csv"]
+    let files = ["people.csv", "groups.csv", "history.csv"]
     func reset() throws {
         for name in ["history.json", "history.json.bak"] {
             let path = temporary.appendingPathComponent(name)
@@ -122,7 +122,7 @@ func runTests() throws {
     let cases: [(String, () throws -> Void)] = [
         ("valid dedicated fixtures", {
             let output = try check()
-            try require(output.contains("7 people, 6 active, 3 family groups"), output)
+            try require(output.contains("7 people, 6 active, 3 exclusion groups"), output)
             try require(output.contains("2025: 6 participants, 6 assignments."), output)
             try require(output.contains("Active participants: Alex,"), output)
         }),
@@ -142,9 +142,9 @@ func runTests() throws {
             try replace("people.csv", ",true", ",yes")
             try check(error: "people.csv:2: active must be true or false")
         }),
-        ("unknown family member", {
-            try replace("families.csv", "household-1,alex", "household-1,nobody")
-            try check(error: "families.csv:2: Unknown person ID")
+        ("unknown group member", {
+            try replace("groups.csv", "household-1,alex", "household-1,nobody")
+            try check(error: "groups.csv:2: Unknown person ID")
         }),
         ("unknown historical recipient", {
             try replace("history.csv", "2024,alex,drew", "2024,alex,nobody")
@@ -176,13 +176,13 @@ func runTests() throws {
             try check(error: "Unterminated quoted field")
         }),
         ("incorrect header", {
-            try replace("families.csv", "group,person_id", "group,person")
-            try check(error: "families.csv:1: Expected header")
+            try replace("groups.csv", "group,person_id", "group,person")
+            try check(error: "groups.csv:1: Expected header")
         }),
-        ("history ignores current family exclusions", {
+        ("history ignores current group exclusions", {
             try importSavedFixture()
             try replace("history.json", "2023", "2026")
-            try replace("families.csv", "household-1,blair", "household-1,blair\nhousehold-1,drew")
+            try replace("groups.csv", "household-1,blair", "household-1,blair\nhousehold-1,drew")
             try check()
         }),
         ("initial import preserves complete assignments", {
@@ -358,10 +358,10 @@ func runTests() throws {
             try require(original.contains("A draw already exists for 2026"), original)
             try require(before == persistedSnapshot(), "Rerun rewrote the draw or backup.")
             try replace("people.csv", "alex,Alex,alex@example.com,,true", "alex,Alexander,new@example.com,,false")
-            try replace("families.csv", "household-1,alex", "household-1,alex\nhousehold-2,alex\nhousehold-3,alex")
+            try replace("groups.csv", "household-1,alex", "household-1,alex\nhousehold-2,alex\nhousehold-3,alex")
             let output = try check(arguments: ["--show-matches"])
             try require(output.contains("Alexander → "), "Saved participant disappeared after deactivation.")
-            try require(before == persistedSnapshot(), "Contact or family edits changed saved assignments.")
+            try require(before == persistedSnapshot(), "Contact or group edits changed saved assignments.")
         }),
         ("saving failure leaves new draw absent", {
             try check()
@@ -383,10 +383,10 @@ func runTests() throws {
             try check(error: "No saved draw for 2026", arguments: ["--send"])
             try require(persistedSnapshot().isEmpty, "Send mode imported history.")
         }),
-        ("declined sending ignores family and history CSV", {
+        ("declined sending ignores group and history CSV", {
             try check(input: "yes\n")
             let before = try persistedSnapshot()
-            try "invalid CSV".write(to: temporary.appendingPathComponent("families.csv"), atomically: true, encoding: .utf8)
+            try "invalid CSV".write(to: temporary.appendingPathComponent("groups.csv"), atomically: true, encoding: .utf8)
             try "invalid CSV".write(to: temporary.appendingPathComponent("history.csv"), atomically: true, encoding: .utf8)
             let output = try check(input: "no\n", arguments: ["--send"])
             try require(output.contains("Pending messages: 6"), output)

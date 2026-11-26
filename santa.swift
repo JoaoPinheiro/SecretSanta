@@ -24,7 +24,7 @@ struct Person {
     let active: Bool
 }
 
-struct FamilyMembership {
+struct GroupMembership {
     let group: String
     let personID: String
 }
@@ -159,7 +159,7 @@ struct DrawRestrictions {
     var eligible: [String: Set<String>]
 }
 
-func drawRestrictions(participants: [String], memberships: [FamilyMembership],
+func drawRestrictions(participants: [String], memberships: [GroupMembership],
                       history: History, year: Int) throws -> DrawRestrictions {
     let pool = Set(participants)
     var groups: [String: Set<String>] = [:]
@@ -227,7 +227,7 @@ func findAssignments<R: RandomNumberGenerator>(eligible: [String: Set<String>],
 }
 
 func validateAssignments(_ assignments: [String: String], participants: [String],
-                         memberships: [FamilyMembership], history: History, year: Int) throws {
+                         memberships: [GroupMembership], history: History, year: Int) throws {
     let pool = Set(participants)
     guard participants.count >= 3, pool.count == participants.count,
           Set(assignments.keys) == pool, Set(assignments.values) == pool else {
@@ -241,7 +241,7 @@ func validateAssignments(_ assignments: [String: String], participants: [String]
         }
         let groups = Set(memberships.filter { $0.personID == giver }.map(\.group))
         guard !memberships.contains(where: { $0.personID == recipient && groups.contains($0.group) }) else {
-            throw InputError("Invalid draw: '\(giver)' and '\(recipient)' share a family group.")
+            throw InputError("Invalid draw: '\(giver)' and '\(recipient)' share a exclusion group.")
         }
         let previousYear = history.keys.compactMap(Int.init).filter {
             $0 < year && history[String($0)]!.participants.contains(giver)
@@ -290,7 +290,7 @@ func validateHistory(_ history: History, personIDs: Set<String>) throws {
               Set(record.submittedEmails).isSubset(of: participants) else {
             throw invalid("submittedEmails must contain unique participant IDs.")
         }
-        // Historical records need not satisfy today's family exclusions.
+        // Historical records need not satisfy today's group exclusions.
     }
 }
 
@@ -465,23 +465,23 @@ func loadPeople(at directory: URL, requireActiveEmails: Bool = true) throws -> [
     return people
 }
 
-func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [HistoricalAssignment]) {
+func loadInputs(at directory: URL) throws -> ([Person], [GroupMembership], [HistoricalAssignment]) {
     let people = try loadPeople(at: directory)
     let personIDs = Set(people.map(\.id))
     func failure(_ file: String, _ row: CSVRow, _ message: String) -> InputError {
         InputError("\(file):\(row.line): \(message)")
     }
     func clean(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines) }
-    var memberships: [FamilyMembership] = []
+    var memberships: [GroupMembership] = []
     var membersByGroup: [String: Set<String>] = [:]
-    for row in try readCSV(directory.appendingPathComponent("families.csv"), headers: ["group", "person_id"]) {
+    for row in try readCSV(directory.appendingPathComponent("groups.csv"), headers: ["group", "person_id"]) {
         let f = row.fields.map(clean)
-        guard !f[0].isEmpty else { throw failure("families.csv", row, "Group name is required.") }
-        guard personIDs.contains(f[1]) else { throw failure("families.csv", row, "Unknown person ID '\(f[1])'.") }
+        guard !f[0].isEmpty else { throw failure("groups.csv", row, "Group name is required.") }
+        guard personIDs.contains(f[1]) else { throw failure("groups.csv", row, "Unknown person ID '\(f[1])'.") }
         guard membersByGroup[f[0], default: []].insert(f[1]).inserted else {
-            throw failure("families.csv", row, "Duplicate membership for '\(f[1])' in '\(f[0])'.")
+            throw failure("groups.csv", row, "Duplicate membership for '\(f[1])' in '\(f[0])'.")
         }
-        memberships.append(FamilyMembership(group: f[0], personID: f[1]))
+        memberships.append(GroupMembership(group: f[0], personID: f[1]))
     }
 
     var history: [HistoricalAssignment] = []
@@ -536,7 +536,7 @@ func main() throws {
     }
     let changed = try saveHistory(history, replacing: saved, to: historyURL)
     let active = people.filter(\.active)
-    print("Inputs valid: \(people.count) people, \(active.count) active, \(Set(memberships.map(\.group)).count) family groups.")
+    print("Inputs valid: \(people.count) people, \(active.count) active, \(Set(memberships.map(\.group)).count) exclusion groups.")
     print("Active participants: \(active.map { "\($0.name)" }.joined(separator: ", "))")
     if history.isEmpty { print("No historical participation supplied.") }
     for year in history.keys.sorted() {

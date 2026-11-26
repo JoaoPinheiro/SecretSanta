@@ -90,7 +90,7 @@ func runMatchingTests() throws {
         }
         try checkGraph(result, eligible)
     }
-    try test("family and historical constraints hold across seeded draws") {
+    try test("group and historical constraints hold across seeded draws") {
         let restrictions = try drawRestrictions(participants: pool, memberships: memberships, history: history, year: 2026)
         for seed in 0..<30 {
             var random = SeededRandom(state: UInt64(seed))
@@ -114,10 +114,11 @@ func runMatchingTests() throws {
         try expect(restrictions.eligible["alex"]!.contains("casey"), "Older recipient was not selected.")
         try expect(!restrictions.eligible["alex"]!.contains("drew"), "Last participation ignored.")
     }
-    try test("overlapping family exclusions are not transitive") {
-        let overlap = memberships + [FamilyMembership(group: "bridge", personID: "blair"),
-                                     FamilyMembership(group: "bridge", personID: "casey")]
+    try test("overlapping group exclusions are not transitive") {
+        let overlap = memberships + [GroupMembership(group: "bridge", personID: "blair"),
+                                     GroupMembership(group: "bridge", personID: "casey")]
         let restrictions = try drawRestrictions(participants: pool, memberships: overlap, history: [:], year: 2026)
+        try expect(!restrictions.eligible["blair"]!.contains("alex"), "First group ignored after adding another membership.")
         try expect(!restrictions.eligible["blair"]!.contains("casey"), "Shared group ignored.")
         try expect(!restrictions.eligible["casey"]!.contains("blair"), "Exclusion is not mutual.")
         try expect(restrictions.eligible["alex"]!.contains("casey"), "Groups incorrectly made transitive.")
@@ -140,7 +141,7 @@ func runMatchingTests() throws {
         }
         try rejects {
             try validateAssignments(valid, participants: ["a", "b", "c"],
-                memberships: [FamilyMembership(group: "family", personID: "a"), FamilyMembership(group: "family", personID: "b")],
+                memberships: [GroupMembership(group: "group", personID: "a"), GroupMembership(group: "group", personID: "b")],
                 history: [:], year: 2026)
         }
         try rejects {
