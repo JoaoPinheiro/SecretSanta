@@ -1,0 +1,12 @@
+{
+  "2023": {
+    "participants": ["alex", "blair", "casey"],
+    "assignments": {
+      "alex": "blair",
+      "blair": "casey",
+      "casey": "alex"
+    },
+    "historyWaivers": [],
+    "submittedEmails": ["alex"]
+  }
+}

@@ -26,6 +26,115 @@ struct HistoricalAssignment {
     let line: Int
 }
 
+struct AnnualHistory: Codable, Equatable {
+    var participants: [String] = []
+    var assignments: [String: String] = [:]
+    var historyWaivers: [String] = []
+    var submittedEmails: [String] = []
+}
+
+typealias History = [String: AnnualHistory]
+
+func validateHistory(_ history: History, personIDs: Set<String>) throws {
+    for year in history.keys.sorted() {
+        let record = history[year]!
+        func invalid(_ message: String) -> InputError {
+            InputError("history.json: \(year): \(message)")
+        }
+        guard year.count == 4, year.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let number = Int(year), number >= 1000 else {
+            throw invalid("Invalid calendar year.")
+        }
+        let participants = Set(record.participants)
+        guard participants.count == record.participants.count else {
+            throw invalid("Duplicate participant IDs.")
+        }
+        guard participants.isSubset(of: personIDs) else {
+            throw invalid("Unknown person IDs: \(participants.subtracting(personIDs).sorted().joined(separator: ", ")).")
+        }
+        guard Set(record.assignments.keys).isSubset(of: participants),
+              Set(record.assignments.values).isSubset(of: participants) else {
+            throw invalid("Every giver and recipient must have a participation record.")
+        }
+        guard Set(record.assignments.values).count == record.assignments.count else {
+            throw invalid("A recipient has more than one giver.")
+        }
+        for (name, ids) in [("historyWaivers", record.historyWaivers), ("submittedEmails", record.submittedEmails)] {
+            guard Set(ids).count == ids.count, Set(ids).isSubset(of: participants) else {
+                throw invalid("\(name) must contain unique participant IDs.")
+            }
+        }
+        guard Set(record.submittedEmails).isSubset(of: Set(record.assignments.keys)) else {
+            throw invalid("Submitted emails require a known assignment.")
+        }
+        guard record.submittedEmails.isEmpty || record.assignments.count == participants.count else {
+            throw invalid("Email sending requires a complete draw: every participant must give and receive once.")
+        }
+        // Historical records may be incomplete or violate today's matching rules.
+    }
+}
+
+func loadHistory(from url: URL, personIDs: Set<String>) throws -> History {
+    guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+    let history: History
+    do {
+        history = try JSONDecoder().decode(History.self, from: Data(contentsOf: url))
+    } catch {
+        throw InputError("history.json: Cannot load saved history: \(error). Existing history was not changed.")
+    }
+    try validateHistory(history, personIDs: personIDs)
+    return history
+}
+
+func mergeHistory(_ imports: [HistoricalAssignment], into saved: History,
+                  personIDs: Set<String>) throws -> History {
+    var merged = saved
+    for entry in imports {
+        let year = String(entry.year)
+        var record = merged[year] ?? AnnualHistory()
+        let original = record
+        if !record.participants.contains(entry.giverID) {
+            record.participants.append(entry.giverID)
+        }
+        if let recipient = entry.recipientID {
+            if let existing = record.assignments[entry.giverID], existing != recipient {
+                throw InputError("history.csv:\(entry.line): Conflicting assignment for '\(entry.giverID)' in \(year): saved '\(existing)', imported '\(recipient)'. Correct the history explicitly.")
+            }
+            record.assignments[entry.giverID] = recipient
+        }
+        guard original.submittedEmails.isEmpty || record == original else {
+            throw InputError("history.csv:\(entry.line): Cannot modify \(year) after email sending has started.")
+        }
+        merged[year] = record
+    }
+    try validateHistory(merged, personIDs: personIDs)
+    return merged
+}
+
+func saveHistory(_ history: History, replacing previous: History, to url: URL) throws -> Bool {
+    guard history != previous else { return false }
+    var ordered = history
+    for year in ordered.keys {
+        ordered[year]!.participants.sort()
+        ordered[year]!.historyWaivers.sort()
+        ordered[year]!.submittedEmails.sort()
+    }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    var data = try encoder.encode(ordered)
+    data.append(0x0A)
+    do {
+        if FileManager.default.fileExists(atPath: url.path) {
+            let previousData = try Data(contentsOf: url)
+            try previousData.write(to: url.appendingPathExtension("bak"), options: .atomic)
+        }
+        try data.write(to: url, options: .atomic)
+    } catch {
+        throw InputError("history.json: Could not save history: \(error.localizedDescription)")
+    }
+    return true
+}
+
 struct CSVRow {
     let fields: [String]
     let line: Int
@@ -177,20 +286,26 @@ func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [His
 
 func main() throws {
     guard CommandLine.arguments.count == 1 else {
-        throw InputError("Usage: swift santa.swift (input validation only; sending is not implemented yet)")
+        throw InputError("Usage: swift santa.swift (history import only; matching and sending are not implemented yet)")
     }
     let directory = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
-    let (people, memberships, history) = try loadInputs(at: directory)
+    let (people, memberships, imports) = try loadInputs(at: directory)
+    let personIDs = Set(people.map(\.id))
+    let historyURL = directory.appendingPathComponent("history.json")
+    let saved = try loadHistory(from: historyURL, personIDs: personIDs)
+    let history = try mergeHistory(imports, into: saved, personIDs: personIDs)
+    let changed = try saveHistory(history, replacing: saved, to: historyURL)
     let active = people.filter(\.active)
     print("Inputs valid: \(people.count) people, \(active.count) active, \(Set(memberships.map(\.group)).count) family groups.")
     print("Active participants: \(active.map { "\($0.name) [\($0.id)]" }.joined(separator: ", "))")
     if history.isEmpty { print("No historical participation supplied.") }
-    for year in Set(history.map(\.year)).sorted() {
-        let entries = history.filter { $0.year == year }
-        let unknown = entries.filter { $0.recipientID == nil }.count
-        print("\(year): \(entries.count) participants, \(entries.count - unknown) known assignments, \(unknown) unknown.")
+    for year in history.keys.sorted() {
+        let record = history[year]!
+        let unknown = record.participants.count - record.assignments.count
+        print("\(year): \(record.participants.count) participants, \(record.assignments.count) known assignments, \(unknown) unknown.")
     }
-    print("Validation only. No files changed or emails sent.")
+    print(changed ? "Imported history saved to history.json." : "History unchanged.")
+    print("No new matches generated or emails sent.")
 }
 
 do { try main() }
