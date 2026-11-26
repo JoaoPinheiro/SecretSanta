@@ -1,6 +1,9 @@
 #!/usr/bin/env swift
 import Foundation
 
+// Annual configuration. Generation currently previews the result without saving it.
+let drawYear = 2026
+
 struct InputError: Error, CustomStringConvertible {
     let description: String
     init(_ message: String) { description = message }
@@ -22,18 +25,120 @@ struct FamilyMembership {
 struct HistoricalAssignment {
     let year: Int
     let giverID: String
-    let recipientID: String?
+    let recipientID: String
     let line: Int
 }
 
 struct AnnualHistory: Codable, Equatable {
     var participants: [String] = []
     var assignments: [String: String] = [:]
-    var historyWaivers: [String] = []
     var submittedEmails: [String] = []
 }
 
 typealias History = [String: AnnualHistory]
+
+struct DrawRestrictions {
+    var eligible: [String: Set<String>]
+}
+
+func drawRestrictions(participants: [String], memberships: [FamilyMembership],
+                      history: History, year: Int) throws -> DrawRestrictions {
+    let pool = Set(participants)
+    var groups: [String: Set<String>] = [:]
+    for membership in memberships {
+        groups[membership.personID, default: []].insert(membership.group)
+    }
+    let previousYears = history.keys.compactMap(Int.init).filter { $0 < year }.sorted(by: >)
+    var eligible: [String: Set<String>] = [:]
+    for giver in participants {
+        var options = pool.filter {
+            $0 != giver && groups[giver, default: []].isDisjoint(with: groups[$0, default: []])
+        }
+        if let previousYear = previousYears.first(where: { history[String($0)]!.participants.contains(giver) }) {
+            guard let recipient = history[String(previousYear)]!.assignments[giver] else {
+                throw InputError("Incomplete history for \(previousYear): missing assignment for '\(giver)'.")
+            }
+            options.remove(recipient)
+        }
+        eligible[giver] = options
+    }
+    return DrawRestrictions(eligible: eligible)
+}
+
+// MRV chooses the giver; shuffled ties and recipient branches randomize the DFS.
+// The backtrack count lets tests verify that failed branches really are explored.
+func findAssignments<R: RandomNumberGenerator>(eligible: [String: Set<String>],
+                                               using random: inout R)
+    -> (assignments: [String: String]?, backtracks: Int) {
+    let participants = eligible.keys.sorted()
+    guard participants.count >= 3 else { return (nil, 0) }
+    var assignments: [String: String] = [:]
+    var taken = Set<String>()
+    var backtracks = 0
+    func search() -> Bool {
+        if assignments.count == participants.count { return true }
+        var choices: [(giver: String, recipients: [String])] = []
+        var minimum = Int.max
+        for giver in participants where assignments[giver] == nil {
+            let options = eligible[giver]!.filter {
+                !taken.contains($0) && assignments[$0] != giver
+            }.sorted()
+            if options.isEmpty { return false }
+            if options.count < minimum {
+                minimum = options.count
+                choices = []
+            }
+            if options.count == minimum { choices.append((giver, options)) }
+        }
+        choices.shuffle(using: &random)
+        let choice = choices[0]
+        var recipients = choice.recipients
+        recipients.shuffle(using: &random)
+        for recipient in recipients {
+            assignments[choice.giver] = recipient
+            taken.insert(recipient)
+            if search() { return true }
+            assignments.removeValue(forKey: choice.giver)
+            taken.remove(recipient)
+            backtracks += 1
+        }
+        return false
+    }
+    let found = search()
+    return (found ? assignments : nil, backtracks)
+}
+
+func validateAssignments(_ assignments: [String: String], participants: [String],
+                         memberships: [FamilyMembership], history: History, year: Int) throws {
+    let pool = Set(participants)
+    guard participants.count >= 3, pool.count == participants.count,
+          Set(assignments.keys) == pool, Set(assignments.values) == pool else {
+        throw InputError("Invalid draw: every participant must give and receive exactly once.")
+    }
+    // Check the original rules independently rather than trusting the search graph.
+    for giver in participants {
+        let recipient = assignments[giver]!
+        guard giver != recipient, assignments[recipient] != giver else {
+            throw InputError("Invalid draw: self-assignment or reciprocal pair involving '\(giver)'.")
+        }
+        let groups = Set(memberships.filter { $0.personID == giver }.map(\.group))
+        guard !memberships.contains(where: { $0.personID == recipient && groups.contains($0.group) }) else {
+            throw InputError("Invalid draw: '\(giver)' and '\(recipient)' share a family group.")
+        }
+        let previousYear = history.keys.compactMap(Int.init).filter {
+            $0 < year && history[String($0)]!.participants.contains(giver)
+        }.max()
+        if let previousYear {
+            if let previousRecipient = history[String(previousYear)]!.assignments[giver] {
+                guard recipient != previousRecipient else {
+                    throw InputError("Invalid draw: '\(giver)' repeats their recipient from \(previousYear).")
+                }
+            } else {
+                throw InputError("Incomplete history for \(previousYear): missing assignment for '\(giver)'.")
+            }
+        }
+    }
+}
 
 func validateHistory(_ history: History, personIDs: Set<String>) throws {
     for year in history.keys.sorted() {
@@ -59,18 +164,15 @@ func validateHistory(_ history: History, personIDs: Set<String>) throws {
         guard Set(record.assignments.values).count == record.assignments.count else {
             throw invalid("A recipient has more than one giver.")
         }
-        for (name, ids) in [("historyWaivers", record.historyWaivers), ("submittedEmails", record.submittedEmails)] {
-            guard Set(ids).count == ids.count, Set(ids).isSubset(of: participants) else {
-                throw invalid("\(name) must contain unique participant IDs.")
-            }
+        guard !participants.isEmpty, Set(record.assignments.keys) == participants,
+              Set(record.assignments.values) == participants else {
+            throw invalid("Incomplete history: every participant must give and receive exactly once.")
         }
-        guard Set(record.submittedEmails).isSubset(of: Set(record.assignments.keys)) else {
-            throw invalid("Submitted emails require a known assignment.")
+        guard Set(record.submittedEmails).count == record.submittedEmails.count,
+              Set(record.submittedEmails).isSubset(of: participants) else {
+            throw invalid("submittedEmails must contain unique participant IDs.")
         }
-        guard record.submittedEmails.isEmpty || record.assignments.count == participants.count else {
-            throw invalid("Email sending requires a complete draw: every participant must give and receive once.")
-        }
-        // Historical records may be incomplete or violate today's matching rules.
+        // Historical records need not satisfy today's family exclusions.
     }
 }
 
@@ -96,12 +198,11 @@ func mergeHistory(_ imports: [HistoricalAssignment], into saved: History,
         if !record.participants.contains(entry.giverID) {
             record.participants.append(entry.giverID)
         }
-        if let recipient = entry.recipientID {
-            if let existing = record.assignments[entry.giverID], existing != recipient {
-                throw InputError("history.csv:\(entry.line): Conflicting assignment for '\(entry.giverID)' in \(year): saved '\(existing)', imported '\(recipient)'. Correct the history explicitly.")
-            }
-            record.assignments[entry.giverID] = recipient
+        let recipient = entry.recipientID
+        if let existing = record.assignments[entry.giverID], existing != recipient {
+            throw InputError("history.csv:\(entry.line): Conflicting assignment for '\(entry.giverID)' in \(year): saved '\(existing)', imported '\(recipient)'. Correct the history explicitly.")
         }
+        record.assignments[entry.giverID] = recipient
         guard original.submittedEmails.isEmpty || record == original else {
             throw InputError("history.csv:\(entry.line): Cannot modify \(year) after email sending has started.")
         }
@@ -116,7 +217,6 @@ func saveHistory(_ history: History, replacing previous: History, to url: URL) t
     var ordered = history
     for year in ordered.keys {
         ordered[year]!.participants.sort()
-        ordered[year]!.historyWaivers.sort()
         ordered[year]!.submittedEmails.sort()
     }
     let encoder = JSONEncoder()
@@ -268,17 +368,18 @@ func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [His
         guard giversByYear[year, default: []].insert(f[1]).inserted else {
             throw failure("history.csv", row, "Duplicate participation for '\(f[1])' in \(year).")
         }
-        if !f[2].isEmpty {
-            guard personIDs.contains(f[2]) else { throw failure("history.csv", row, "Unknown recipient ID '\(f[2])'.") }
-            guard recipientsByYear[year, default: []].insert(f[2]).inserted else {
-                throw failure("history.csv", row, "Recipient '\(f[2])' appears more than once in \(year).")
-            }
+        guard !f[2].isEmpty else {
+            throw failure("history.csv", row, "Recipient is required; historical years must be complete.")
         }
-        history.append(HistoricalAssignment(year: year, giverID: f[1], recipientID: f[2].isEmpty ? nil : f[2], line: row.line))
+        guard personIDs.contains(f[2]) else { throw failure("history.csv", row, "Unknown recipient ID '\(f[2])'.") }
+        guard recipientsByYear[year, default: []].insert(f[2]).inserted else {
+            throw failure("history.csv", row, "Recipient '\(f[2])' appears more than once in \(year).")
+        }
+        history.append(HistoricalAssignment(year: year, giverID: f[1], recipientID: f[2], line: row.line))
     }
     for entry in history {
-        if let recipient = entry.recipientID, !giversByYear[entry.year, default: []].contains(recipient) {
-            throw InputError("history.csv:\(entry.line): Recipient '\(recipient)' needs a participation row for \(entry.year) (leave their recipient blank if unknown).")
+        if !giversByYear[entry.year, default: []].contains(entry.recipientID) {
+            throw InputError("history.csv:\(entry.line): Recipient '\(entry.recipientID)' needs a participation row for \(entry.year); historical years must be complete.")
         }
     }
     return (people, memberships, history)
@@ -286,7 +387,7 @@ func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [His
 
 func main() throws {
     guard CommandLine.arguments.count == 1 else {
-        throw InputError("Usage: swift santa.swift (history import only; matching and sending are not implemented yet)")
+        throw InputError("Usage: swift santa.swift (preview only; saving new draws and sending are not implemented yet)")
     }
     let directory = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
     let (people, memberships, imports) = try loadInputs(at: directory)
@@ -301,15 +402,38 @@ func main() throws {
     if history.isEmpty { print("No historical participation supplied.") }
     for year in history.keys.sorted() {
         let record = history[year]!
-        let unknown = record.participants.count - record.assignments.count
-        print("\(year): \(record.participants.count) participants, \(record.assignments.count) known assignments, \(unknown) unknown.")
+        print("\(year): \(record.participants.count) participants, \(record.assignments.count) assignments.")
     }
     print(changed ? "Imported history saved to history.json." : "History unchanged.")
-    print("No new matches generated or emails sent.")
+    if let existing = history[String(drawYear)] {
+        print("A draw already exists for \(drawYear); no new matches generated.")
+        for giver in existing.participants.sorted() {
+            print("\(giver) → \(existing.assignments[giver]!)")
+        }
+        return
+    }
+    let participants = active.map(\.id)
+    guard participants.count >= 3 else { throw InputError("At least three active participants are required.") }
+    let restrictions = try drawRestrictions(participants: participants, memberships: memberships, history: history, year: drawYear)
+    var random = SystemRandomNumberGenerator()
+    guard let assignments = findAssignments(eligible: restrictions.eligible, using: &random).assignments else {
+        throw InputError("No valid draw exists for these participants and restrictions.")
+    }
+    try validateAssignments(assignments, participants: participants, memberships: memberships,
+                            history: history, year: drawYear)
+    let names = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0.name) })
+    print("Proposed matches for \(drawYear):")
+    for giver in participants.sorted() {
+        let recipient = assignments[giver]!
+        print("\(names[giver]!) [\(giver)] → \(names[recipient]!) [\(recipient)]")
+    }
+    print("Preview only. New matches were not saved. No emails sent.")
 }
 
+#if !TESTING
 do { try main() }
 catch {
     FileHandle.standardError.write(Data("Error: \(error)\n".utf8))
     exit(1)
 }
+#endif
