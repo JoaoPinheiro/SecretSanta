@@ -295,10 +295,10 @@ func runTests() throws {
             try fm.createDirectory(at: temporary.appendingPathComponent("history.json.bak"), withIntermediateDirectories: false)
             try check(error: "Could not save history")
         }),
-        ("complete history previews without prompts or saving", {
+        ("EOF leaves preview unsaved", {
             let output = try check()
             try require(output.contains("Proposed matches for 2026:"), output)
-            try require(!output.contains("[y/N]"), "Unexpected prompt.")
+            try require(output.contains("Save this draw for 2026? [y/N]"), output)
             try require(output.contains("New matches were not saved"), output)
             try require(try readHistory()["2026"] == nil, "Preview was saved.")
             let before = try persistedSnapshot()
@@ -311,6 +311,64 @@ func runTests() throws {
             let output = try check(input: "yes\n")
             try require(output.contains("A draw already exists for 2026"), output)
             try require(!output.contains("Proposed matches"), output)
+            try require(!output.contains("Save this draw"), output)
+        }),
+        ("declining or unrecognized confirmation never saves", {
+            try check()
+            let before = try persistedSnapshot()
+            for answer in ["no\n", "n\n", "\n", "maybe\n"] {
+                let output = try check(input: answer)
+                try require(output.contains("New matches were not saved"), output)
+                try require(before == persistedSnapshot(), "Declining changed saved history.")
+            }
+        }),
+        ("confirmation saves exactly the reviewed assignments", {
+            try check()
+            let before = try Data(contentsOf: temporary.appendingPathComponent("history.json"))
+            let output = try check(input: "yes\n")
+            try require(output.contains("Draw for 2026 saved to history.json"), output)
+            let records = try readHistory()
+            let assignments = records["2026"]?["assignments"] as? [String: String] ?? [:]
+            let participants = records["2026"]?["participants"] as? [String] ?? []
+            try require(assignments.count == 6 && Set(assignments.keys) == Set(participants)
+                        && Set(assignments.values) == Set(participants), "Saved draw is incomplete.")
+            let lines = output.components(separatedBy: "\n").filter { $0.contains(" → ") }
+            try require(lines.count == assignments.count, "Saved count differs from preview.")
+            for (giver, recipient) in assignments {
+                try require(lines.contains { $0.contains("[\(giver)] → ") && $0.hasSuffix("[\(recipient)]") },
+                            "Saved assignment differs from preview.")
+            }
+            try require((records["2026"]?["submittedEmails"] as? [String]) == [], "New draw marked as sent.")
+            try require(Data(contentsOf: temporary.appendingPathComponent("history.json.bak")) == before,
+                        "Draw save did not preserve the previous history.")
+        }),
+        ("saved draw survives reruns and participant edits", {
+            try check(input: " Y \n")
+            let before = try persistedSnapshot()
+            let original = try check(input: "yes\n")
+            try require(original.contains("A draw already exists for 2026"), original)
+            try require(before == persistedSnapshot(), "Rerun rewrote the draw or backup.")
+            try replace("people.csv", "alex,Alex,alex@example.com,,true", "alex,Alexander,new@example.com,,false")
+            try replace("families.csv", "household-1,alex", "household-1,alex\nhousehold-2,alex\nhousehold-3,alex")
+            let output = try check()
+            try require(output.contains("Alexander [alex] → "), "Saved participant disappeared after deactivation.")
+            try require(before == persistedSnapshot(), "Contact or family edits changed saved assignments.")
+        }),
+        ("saving failure leaves new draw absent", {
+            try check()
+            try fm.createDirectory(at: temporary.appendingPathComponent("history.json.bak"), withIntermediateDirectories: false)
+            try check(error: "Could not save history", input: "yes\n")
+            try require(try readHistory()["2026"] == nil, "Failed save persisted a draw.")
+        }),
+        ("CSV cannot extend an existing target-year draw", {
+            try importSavedFixture()
+            try replace("history.json", "2023", "2026")
+            var records = try readHistory()
+            records["2026"]?["submittedEmails"] = [] as [String]
+            try writeHistory(records)
+            try replace("history.csv", "year,giver_id,recipient_id\n",
+                        "year,giver_id,recipient_id\n2026,drew,ellis\n2026,ellis,frankie\n2026,frankie,drew\n")
+            try check(error: "importing changes to it is not allowed")
         }),
     ]
     var failures = 0

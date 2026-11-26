@@ -1,7 +1,7 @@
 #!/usr/bin/env swift
 import Foundation
 
-// Annual configuration. Generation currently previews the result without saving it.
+// Annual configuration. Saving a new draw requires explicit confirmation.
 let drawYear = 2026
 
 struct InputError: Error, CustomStringConvertible {
@@ -387,7 +387,7 @@ func loadInputs(at directory: URL) throws -> ([Person], [FamilyMembership], [His
 
 func main() throws {
     guard CommandLine.arguments.count == 1 else {
-        throw InputError("Usage: swift santa.swift (preview only; saving new draws and sending are not implemented yet)")
+        throw InputError("Usage: swift santa.swift (generate, review, and save; sending is not implemented yet)")
     }
     let directory = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
     let (people, memberships, imports) = try loadInputs(at: directory)
@@ -395,21 +395,30 @@ func main() throws {
     let historyURL = directory.appendingPathComponent("history.json")
     let saved = try loadHistory(from: historyURL, personIDs: personIDs)
     let history = try mergeHistory(imports, into: saved, personIDs: personIDs)
+    let year = String(drawYear)
+    if let existing = saved[year], history[year] != existing {
+        throw InputError("A draw already exists for \(drawYear); importing changes to it is not allowed.")
+    }
     let changed = try saveHistory(history, replacing: saved, to: historyURL)
     let active = people.filter(\.active)
     print("Inputs valid: \(people.count) people, \(active.count) active, \(Set(memberships.map(\.group)).count) family groups.")
-    print("Active participants: \(active.map { "\($0.name) [\($0.id)]" }.joined(separator: ", "))")
+    print("Active participants: \(active.map { "\($0.name)" }.joined(separator: ", "))")
     if history.isEmpty { print("No historical participation supplied.") }
     for year in history.keys.sorted() {
         let record = history[year]!
         print("\(year): \(record.participants.count) participants, \(record.assignments.count) assignments.")
     }
     print(changed ? "Imported history saved to history.json." : "History unchanged.")
-    if let existing = history[String(drawYear)] {
-        print("A draw already exists for \(drawYear); no new matches generated.")
-        for giver in existing.participants.sorted() {
-            print("\(giver) → \(existing.assignments[giver]!)")
+    let names = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0.name) })
+    func showAssignments(_ assignments: [String: String]) {
+        for giver in assignments.keys.sorted() {
+            let recipient = assignments[giver]!
+            print("\(names[giver]!) → \(names[recipient]!)")
         }
+    }
+    if let existing = history[year] {
+        print("A draw already exists for \(drawYear); no new matches generated.")
+        showAssignments(existing.assignments)
         return
     }
     let participants = active.map(\.id)
@@ -421,13 +430,19 @@ func main() throws {
     }
     try validateAssignments(assignments, participants: participants, memberships: memberships,
                             history: history, year: drawYear)
-    let names = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0.name) })
     print("Proposed matches for \(drawYear):")
-    for giver in participants.sorted() {
-        let recipient = assignments[giver]!
-        print("\(names[giver]!) [\(giver)] → \(names[recipient]!) [\(recipient)]")
+    showAssignments(assignments)
+    print("Save this draw for \(drawYear)? [y/N]")
+    let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard answer == "y" || answer == "yes" else {
+        print("New matches were not saved. No emails sent.")
+        return
     }
-    print("Preview only. New matches were not saved. No emails sent.")
+    var updated = history
+    updated[year] = AnnualHistory(participants: participants, assignments: assignments)
+    try validateHistory(updated, personIDs: personIDs)
+    _ = try saveHistory(updated, replacing: history, to: historyURL)
+    print("Draw for \(drawYear) saved to history.json. No emails sent.")
 }
 
 #if !TESTING
