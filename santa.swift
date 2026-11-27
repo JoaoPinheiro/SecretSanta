@@ -598,7 +598,7 @@ func run(at directory: URL, options: Options,
     if options.showMatches {
         let names = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0.name) })
         for giver in history[year]!.assignments.keys.sorted() {
-            output("\(names[giver]!) → \(names[history[year]!.assignments[giver]!]!)")
+            output("- \(names[giver]!) -> \(names[history[year]!.assignments[giver]!]!)")
         }
     }
     if options.noEmail {
