@@ -34,7 +34,7 @@ func runTests() throws {
     let fm = FileManager.default
     let tests = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
     let fixtures = tests.appendingPathComponent("Fixtures")
-    for name in ["people.csv", "groups.csv", "history.csv", "saved-history.json", "matching.json", "fake-send.applescript", "check-mail-arguments.applescript"] {
+    for name in ["people.csv", "groups.csv", "history.csv", "saved-history.json", "matching.json", "fake-send.applescript", "check-mail-arguments.applescript", "config.json"] {
         try require(fm.isReadableFile(atPath: fixtures.appendingPathComponent(name).path),
                     "Missing required test fixture: Tests/Fixtures/\(name). Restore it before running tests.")
     }
@@ -53,7 +53,7 @@ func runTests() throws {
     ])
     try require(compiled.status == 0, "Compilation failed:\n\(compiled.output)")
 
-    let files = ["people.csv", "groups.csv", "history.csv"]
+    let files = ["people.csv", "groups.csv", "history.csv", "config.json"]
     func reset() throws {
         for name in ["history.json", "history.json.bak"] {
             let path = temporary.appendingPathComponent(name)
@@ -79,7 +79,7 @@ func runTests() throws {
         return result
     }
     @discardableResult
-    func check(error: String? = nil, input: String = "", arguments: [String] = []) throws -> String {
+    func check(error: String? = nil, input: String = "yes\n", arguments: [String] = []) throws -> String {
         let before = try snapshot()
         let persistedBefore = try persistedSnapshot()
         let result = try execute(binary, arguments, input: input)
@@ -119,21 +119,99 @@ func runTests() throws {
                         to: temporary.appendingPathComponent("history.json"))
     }
 
+    @discardableResult
+    func checkWithoutSending(error: String? = nil, input: String = "", arguments: [String] = []) throws -> String {
+        try check(error: error, input: input, arguments: arguments + ["--no-email"])
+    }
+
     let cases: [(String, () throws -> Void)] = [
-        ("valid dedicated fixtures", {
-            let output = try check()
-            try require(output.contains("7 people, 6 active, 3 exclusion groups"), output)
-            try require(output.contains("2025: 6 participants, 6 assignments."), output)
-            try require(output.contains("Active participants: Alex,"), output)
-        }),
         ("quoted fields, escaped quotes, BOM, and CRLF", {
             try replace("people.csv", "alex,Alex,", "alex,\"Alex, \"\"Al\"\"\nSmith\",")
             let path = temporary.appendingPathComponent("people.csv")
             let text = try String(contentsOf: path, encoding: .utf8)
             try ("\u{FEFF}" + text.replacingOccurrences(of: "\n", with: "\r\n")).write(to: path, atomically: true, encoding: .utf8)
-            let output = try check()
+            let output = try checkWithoutSending(arguments: ["--show-matches"])
             try require(output.contains("Alex, \"Al\"\nSmith"), output)
         }),
+        ("history ignores current group exclusions", {
+            try importSavedFixture()
+            try replace("history.json", "2023", "2026")
+            try replace("groups.csv", "household-1,blair", "household-1,blair\nhousehold-1,drew")
+            try checkWithoutSending()
+        }),
+        ("identical reimport changes neither history nor backup", {
+            try importSavedFixture()
+            try checkWithoutSending()
+            let before = try persistedSnapshot()
+            let output = try checkWithoutSending()
+            try require(output.contains("History unchanged."), output)
+            try require(before == persistedSnapshot(), "Identical reimport rewrote persisted files.")
+        }),
+        ("new year imported with exact previous-file backup", {
+            try checkWithoutSending()
+            let before = try Data(contentsOf: temporary.appendingPathComponent("history.json"))
+            try replace("history.csv", "2024", "2022")
+            try checkWithoutSending()
+            let records = try readHistory()
+            try require(records["2022"] != nil && records["2024"] != nil,
+                        "New or previously saved year is missing.")
+            try require(Data(contentsOf: temporary.appendingPathComponent("history.json.bak")) == before,
+                        "Backup does not contain the exact previous history.")
+        }),
+        ("conflicting known assignment leaves files intact", {
+            try checkWithoutSending()
+            try replace("history.csv", "2025,alex,casey", "2025,alex,blair")
+            try replace("history.csv", "2025,frankie,blair", "2025,frankie,casey")
+            try checkWithoutSending(error: "Conflicting assignment for 'alex' in 2025")
+        }),
+        ("blank recipient rejected without changing saved history", {
+            try checkWithoutSending()
+            try replace("history.csv", "2025,alex,casey", "2025,alex,")
+            try checkWithoutSending(error: "Recipient is required; historical years must be complete")
+        }),
+        ("existing years and delivery metadata survive import", {
+            try importSavedFixture()
+            let old = try readHistory()
+            let oldData = try Data(contentsOf: temporary.appendingPathComponent("history.json"))
+            try checkWithoutSending()
+            let records = try readHistory()
+            try require(NSDictionary(dictionary: records["2023"]!) == NSDictionary(dictionary: old["2023"]!),
+                        "Historical year or delivery metadata changed.")
+            try require(Data(contentsOf: temporary.appendingPathComponent("history.json.bak")) == oldData,
+                        "Previous saved fixture was not backed up.")
+        }),
+        ("sent year accepts identical rows but rejects additions", {
+            try importSavedFixture()
+            try replace("history.csv", "year,giver_id,recipient_id\n",
+                        "year,giver_id,recipient_id\n2023,alex,blair\n2023,blair,casey\n2023,casey,alex\n")
+            try checkWithoutSending()
+            try replace("history.csv", "2023,casey,alex\n", "2023,casey,alex\n2023,drew,ellis\n2023,ellis,frankie\n2023,frankie,drew\n")
+            try checkWithoutSending(error: "Cannot modify 2023 after email sending has started")
+        }),
+        ("contact edits and deactivation preserve history", {
+            try checkWithoutSending()
+            let before = try persistedSnapshot()
+            try replace("people.csv", "alex,Alex,alex@example.com,,true", "alex,Alexander,new@example.com,,false")
+            try checkWithoutSending()
+            try require(before == persistedSnapshot(), "Contact edits changed historical identity.")
+        }),
+        ("backup failure prevents history replacement", {
+            try checkWithoutSending()
+            try replace("history.csv", "2024", "2022")
+            try fm.createDirectory(at: temporary.appendingPathComponent("history.json.bak"), withIntermediateDirectories: false)
+            try checkWithoutSending(error: "Could not save history")
+        }),
+        ("CSV cannot extend an existing target-year draw", {
+            try importSavedFixture()
+            try replace("history.json", "2023", "2026")
+            var records = try readHistory()
+            records["2026"]?["submittedEmails"] = [] as [String]
+            try writeHistory(records)
+            try replace("history.csv", "year,giver_id,recipient_id\n",
+                        "year,giver_id,recipient_id\n2026,drew,ellis\n2026,ellis,frankie\n2026,frankie,drew\n")
+            try checkWithoutSending(error: "importing changes to it is not allowed")
+        }),
+
         ("duplicate person", {
             try replace("people.csv", "blair,Blair", "alex,Blair")
             try check(error: "people.csv:3: Duplicate person ID")
@@ -158,11 +236,6 @@ func runTests() throws {
             try replace("history.csv", "2024,blair,ellis", "2024,blair,drew")
             try check(error: "appears more than once in 2024")
         }),
-        ("optional history absent", {
-            try fm.removeItem(at: temporary.appendingPathComponent("history.csv"))
-            let output = try check()
-            try require(output.contains("No historical participation supplied"), output)
-        }),
         ("required input absent", {
             try fm.removeItem(at: temporary.appendingPathComponent("people.csv"))
             try check(error: "people.csv: Cannot read UTF-8 CSV")
@@ -178,73 +251,6 @@ func runTests() throws {
         ("incorrect header", {
             try replace("groups.csv", "group,person_id", "group,person")
             try check(error: "groups.csv:1: Expected header")
-        }),
-        ("history ignores current group exclusions", {
-            try importSavedFixture()
-            try replace("history.json", "2023", "2026")
-            try replace("groups.csv", "household-1,blair", "household-1,blair\nhousehold-1,drew")
-            try check()
-        }),
-        ("initial import preserves complete assignments", {
-            try check()
-            let records = try readHistory()
-            try require(Set(records.keys) == Set(["2024", "2025"]), "Missing imported years.")
-            let assignments = records["2025"]?["assignments"] as? [String: String]
-            let participants = records["2025"]?["participants"] as? [String]
-            try require(assignments?["alex"] == "casey", "Known assignment lost.")
-            try require(assignments?["frankie"] == "blair" && participants?.contains("frankie") == true,
-                        "Complete participation was not preserved.")
-            try require(!fm.fileExists(atPath: temporary.appendingPathComponent("history.json.bak").path),
-                        "First import should not create a backup.")
-        }),
-        ("identical reimport changes neither history nor backup", {
-            try importSavedFixture()
-            try check()
-            let before = try persistedSnapshot()
-            let output = try check()
-            try require(output.contains("History unchanged."), output)
-            try require(before == persistedSnapshot(), "Identical reimport rewrote persisted files.")
-        }),
-        ("new year imported with exact previous-file backup", {
-            try check()
-            let before = try Data(contentsOf: temporary.appendingPathComponent("history.json"))
-            try replace("history.csv", "2024", "2022")
-            try check()
-            let records = try readHistory()
-            try require(records["2022"] != nil && records["2024"] != nil,
-                        "New or previously saved year is missing.")
-            try require(Data(contentsOf: temporary.appendingPathComponent("history.json.bak")) == before,
-                        "Backup does not contain the exact previous history.")
-        }),
-        ("conflicting known assignment leaves files intact", {
-            try check()
-            try replace("history.csv", "2025,alex,casey", "2025,alex,blair")
-            try replace("history.csv", "2025,frankie,blair", "2025,frankie,casey")
-            try check(error: "Conflicting assignment for 'alex' in 2025")
-        }),
-        ("blank recipient rejected without changing saved history", {
-            try check()
-            try replace("history.csv", "2025,alex,casey", "2025,alex,")
-            try check(error: "Recipient is required; historical years must be complete")
-        }),
-        ("existing years and delivery metadata survive import", {
-            try importSavedFixture()
-            let old = try readHistory()
-            let oldData = try Data(contentsOf: temporary.appendingPathComponent("history.json"))
-            try check()
-            let records = try readHistory()
-            try require(NSDictionary(dictionary: records["2023"]!) == NSDictionary(dictionary: old["2023"]!),
-                        "Historical year or delivery metadata changed.")
-            try require(Data(contentsOf: temporary.appendingPathComponent("history.json.bak")) == oldData,
-                        "Previous saved fixture was not backed up.")
-        }),
-        ("sent year accepts identical rows but rejects additions", {
-            try importSavedFixture()
-            try replace("history.csv", "year,giver_id,recipient_id\n",
-                        "year,giver_id,recipient_id\n2023,alex,blair\n2023,blair,casey\n2023,casey,alex\n")
-            try check()
-            try replace("history.csv", "2023,casey,alex\n", "2023,casey,alex\n2023,drew,ellis\n2023,ellis,frankie\n2023,frankie,drew\n")
-            try check(error: "Cannot modify 2023 after email sending has started")
         }),
         ("malformed saved JSON is never replaced", {
             try "{ broken JSON".write(to: temporary.appendingPathComponent("history.json"), atomically: true, encoding: .utf8)
@@ -272,141 +278,78 @@ func runTests() throws {
             try writeHistory(records)
             try check(error: "Incomplete history: every participant must give and receive exactly once")
         }),
-        ("JSON loads without a historical CSV", {
-            try importSavedFixture()
-            try fm.removeItem(at: temporary.appendingPathComponent("history.csv"))
-            let before = try persistedSnapshot()
-            let output = try check()
-            try require(output.contains("2023: 3 participants, 3 assignments."), output)
-            try require(before == persistedSnapshot(), "Read-only load changed history.")
-        }),
-        ("no history inputs create no files", {
-            try fm.removeItem(at: temporary.appendingPathComponent("history.csv"))
-            try check()
-            try require(persistedSnapshot().isEmpty, "Empty history should not create files.")
-        }),
-        ("contact edits and deactivation preserve history", {
-            try check()
-            let before = try persistedSnapshot()
-            try replace("people.csv", "alex,Alex,alex@example.com,,true", "alex,Alexander,new@example.com,,false")
-            try check()
-            try require(before == persistedSnapshot(), "Contact edits changed historical identity.")
-        }),
-        ("backup failure prevents history replacement", {
-            try check()
-            try replace("history.csv", "2024", "2022")
-            try fm.createDirectory(at: temporary.appendingPathComponent("history.json.bak"), withIntermediateDirectories: false)
-            try check(error: "Could not save history")
-        }),
-        ("EOF leaves preview unsaved", {
-            let output = try check()
-            try require(output.contains("Draw generated for 2026."), output)
-            try require(!output.contains(" → "), "Default output revealed matches.")
-            try require(output.contains("Save this draw for 2026? [y/N]"), output)
-            try require(output.contains("New matches were not saved"), output)
-            try require(try readHistory()["2026"] == nil, "Preview was saved.")
-            let before = try persistedSnapshot()
-            try check()
-            try require(before == persistedSnapshot(), "Repeated preview changed history.")
-        }),
-        ("existing year is not regenerated", {
-            try importSavedFixture()
-            try replace("history.json", "2023", "2026")
-            let output = try check(input: "yes\n")
-            try require(output.contains("A draw already exists for 2026"), output)
-            try require(!output.contains(" → "), "Default output revealed saved matches.")
-            try require(!output.contains("Proposed matches"), output)
-            try require(!output.contains("Save this draw"), output)
-        }),
-        ("declining or unrecognized confirmation never saves", {
-            try check()
-            let before = try persistedSnapshot()
-            for answer in ["no\n", "n\n", "\n", "maybe\n"] {
-                let output = try check(input: answer)
-                try require(output.contains("New matches were not saved"), output)
-                try require(before == persistedSnapshot(), "Declining changed saved history.")
-            }
-        }),
-        ("confirmation saves exactly the reviewed assignments", {
-            try check()
-            let before = try Data(contentsOf: temporary.appendingPathComponent("history.json"))
-            let output = try check(input: "yes\n", arguments: ["--show-matches"])
-            try require(output.contains("Draw for 2026 saved to history.json"), output)
-            let records = try readHistory()
-            let assignments = records["2026"]?["assignments"] as? [String: String] ?? [:]
-            let participants = records["2026"]?["participants"] as? [String] ?? []
-            try require(assignments.count == 6 && Set(assignments.keys) == Set(participants)
-                        && Set(assignments.values) == Set(participants), "Saved draw is incomplete.")
-            let lines = output.components(separatedBy: "\n").filter { $0.contains(" → ") }
-            try require(lines.count == assignments.count, "Saved count differs from preview.")
-            // These fixture rows are unquoted; the CSV parser is tested separately.
-            let contactRows = try String(contentsOf: fixtures.appendingPathComponent("people.csv"), encoding: .utf8)
-                .split(separator: "\n").dropFirst().map { $0.split(separator: ",", omittingEmptySubsequences: false) }
-            let names = Dictionary(uniqueKeysWithValues: contactRows.map { (String($0[0]), String($0[1])) })
-            for (giver, recipient) in assignments {
-                try require(lines.contains("\(names[giver]!) → \(names[recipient]!)"),
-                            "Saved assignment differs from preview.")
-            }
-            try require((records["2026"]?["submittedEmails"] as? [String]) == [], "New draw marked as sent.")
-            try require(Data(contentsOf: temporary.appendingPathComponent("history.json.bak")) == before,
-                        "Draw save did not preserve the previous history.")
-        }),
-        ("saved draw survives reruns and participant edits", {
-            try check(input: " Y \n")
-            let before = try persistedSnapshot()
-            let original = try check(input: "yes\n")
-            try require(original.contains("A draw already exists for 2026"), original)
-            try require(before == persistedSnapshot(), "Rerun rewrote the draw or backup.")
-            try replace("people.csv", "alex,Alex,alex@example.com,,true", "alex,Alexander,new@example.com,,false")
-            try replace("groups.csv", "household-1,alex", "household-1,alex\nhousehold-2,alex\nhousehold-3,alex")
-            let output = try check(arguments: ["--show-matches"])
-            try require(output.contains("Alexander → "), "Saved participant disappeared after deactivation.")
-            try require(before == persistedSnapshot(), "Contact or group edits changed saved assignments.")
-        }),
-        ("saving failure leaves new draw absent", {
-            try check()
-            try fm.createDirectory(at: temporary.appendingPathComponent("history.json.bak"), withIntermediateDirectories: false)
-            try check(error: "Could not save history", input: "yes\n")
-            try require(try readHistory()["2026"] == nil, "Failed save persisted a draw.")
-        }),
-        ("CSV cannot extend an existing target-year draw", {
-            try importSavedFixture()
-            try replace("history.json", "2023", "2026")
-            var records = try readHistory()
-            records["2026"]?["submittedEmails"] = [] as [String]
-            try writeHistory(records)
-            try replace("history.csv", "year,giver_id,recipient_id\n",
-                        "year,giver_id,recipient_id\n2026,drew,ellis\n2026,ellis,frankie\n2026,frankie,drew\n")
-            try check(error: "importing changes to it is not allowed")
-        }),
-        ("send requires a saved draw and never imports CSV", {
-            try check(error: "No saved draw for 2026", arguments: ["--send"])
-            try require(persistedSnapshot().isEmpty, "Send mode imported history.")
-        }),
-        ("declined sending ignores group and history CSV", {
-            try check(input: "yes\n")
-            let before = try persistedSnapshot()
-            try "invalid CSV".write(to: temporary.appendingPathComponent("groups.csv"), atomically: true, encoding: .utf8)
-            try "invalid CSV".write(to: temporary.appendingPathComponent("history.csv"), atomically: true, encoding: .utf8)
-            let output = try check(input: "no\n", arguments: ["--send"])
-            try require(output.contains("Pending messages: 6"), output)
-            try require(output.contains("Sending cancelled"), output)
-            try require(!output.contains("Proposed matches") && !output.contains("Save this draw"), output)
-            try require(before == persistedSnapshot(), "Send preview changed persisted files.")
-        }),
-        ("CLI records fake submissions only after confirmation", {
-            try check(input: "yes\n")
-            let output = try check(input: "yes\n", arguments: ["--send"])
-            try require(output.contains("Recorded 6 submissions"), output)
-            try require((try readHistory()["2026"]?["submittedEmails"] as? [String])?.count == 6,
-                        "CLI did not record submissions.")
-            let before = try persistedSnapshot()
-            let rerun = try check(input: "yes\n", arguments: ["--send"])
-            try require(rerun.contains("Nothing to send"), rerun)
-            try require(before == persistedSnapshot(), "Completed batch changed on rerun.")
-        }),
         ("unsupported arguments are rejected", {
-            try check(error: "Usage: swift santa.swift [--send | --show-matches]", arguments: ["--other"])
+            try check(error: "Usage: swift santa.swift [--show-matches] [--no-email] [--regenerate-matches]", arguments: ["--other"])
+        }),
+        ("default run imports, saves and sends after confirmation", {
+            let output = try check()
+            let records = try readHistory()
+            try require(records["2024"] != nil && records["2025"] != nil, "Imports missing.")
+            try require((records["2026"]?["submittedEmails"] as? [String])?.count == 6, "Default did not send.")
+            try require(output.contains("Generated 6 matches") && output.contains("Submitted email to Alex."), output)
+            try require(!output.contains(" → ") && !output.contains("Subject:") && output.contains("[y/N]"), output)
+            let before = try persistedSnapshot()
+            let rerun = try check()
+            try require(rerun.contains("Using 6 saved matches") && rerun.contains("Nothing to send"), rerun)
+            try require(before == persistedSnapshot(), "Completed rerun changed state.")
+        }),
+        ("decline, blank, EOF and unexpected input save but never send", {
+            for input in ["no\n", "\n", "", "maybe\n"] {
+                let output = try check(input: input)
+                try require(output.contains("Sending cancelled"), output)
+                try require((try readHistory()["2026"]?["submittedEmails"] as? [String]) == [], "Decline sent emails.")
+            }
+        }),
+        ("no-email saves and shows matches; later run sends saved draw", {
+            let output = try check(arguments: ["--show-matches", "--no-email"])
+            try require(output.components(separatedBy: " → ").count == 7, output)
+            let before = try readHistory()
+            try require((before["2026"]?["submittedEmails"] as? [String]) == [], "No-sending submitted emails.")
+            let again = try check(arguments: ["--no-email", "--show-matches"])
+            let lines: (String) -> [String] = { $0.components(separatedBy: "\n").filter { $0.contains(" → ") } }
+            try require(lines(output) == lines(again), "Show changed saved matches.")
+            try check()
+            let after = try readHistory()
+            try require(NSDictionary(dictionary: before["2026"]?["assignments"] as! [String: String]) == NSDictionary(dictionary: after["2026"]?["assignments"] as! [String: String]), "Sending regenerated draw.")
+        }),
+        ("all flags regenerate saved draw and clear submissions", {
+            try check()
+            try replace("people.csv", "frankie,Frankie,frankie@example.com,,true", "frankie,Frankie,frankie@example.com,,false")
+            let output = try check(arguments: ["--show-matches", "--regenerate-matches", "--no-email"])
+            let record = try readHistory()["2026"]!
+            try require(output.contains("Regenerated 5 matches"), output)
+            try require((record["participants"] as? [String])?.count == 5, "Regeneration ignored active pool.")
+            try require((record["submittedEmails"] as? [String]) == [], "Submission records not cleared.")
+            let sent = try check()
+            try require(sent.contains("Recorded 5 submissions"), sent)
+        }),
+        ("regenerate without no-email resends", {
+            try check()
+            let output = try check(arguments: ["--regenerate-matches"])
+            try require(output.contains("Recorded 6 submissions"), output)
+        }),
+        ("failed regeneration preserves existing draw and backup", {
+            try check()
+            let before = try persistedSnapshot()
+            for id in ["alex", "blair", "casey", "drew", "ellis", "frankie"] {
+                let path = temporary.appendingPathComponent("groups.csv")
+                let text = try String(contentsOf: path, encoding: .utf8)
+                try (text + "all," + id + "\n").write(to: path, atomically: true, encoding: .utf8)
+            }
+            try check(error: "No valid draw exists", arguments: ["--regenerate-matches"])
+            try require(before == persistedSnapshot(), "Failed regeneration changed state.")
+        }),
+        ("year and email templates come from configuration", {
+            try replace("config.json", "2026", "2027")
+            let output = try check(arguments: ["--no-email"])
+            try require(output.contains("Generated 6 matches for 2027"), output)
+            try require(try readHistory()["2027"] != nil, "Configured year ignored.")
+        }),
+        ("missing or invalid configuration fails before writing", {
+            try replace("config.json", "2026", "26")
+            try check(error: "four-digit calendar year")
+            try fm.removeItem(at: temporary.appendingPathComponent("config.json"))
+            try check(error: "Cannot load configuration")
         }),
     ]
     var failures = 0
@@ -426,8 +369,9 @@ func runTests() throws {
     // Compile the actual production functions with a separate Swift test entrypoint.
     let matchingSource = temporary.appendingPathComponent("matching-tests.swift")
     let production = try String(contentsOf: source, encoding: .utf8)
+    let workflowTests = try String(contentsOf: tests.appendingPathComponent("WorkflowTests.swift"), encoding: .utf8)
     let matchingTests = try String(contentsOf: tests.appendingPathComponent("MatchingTests.swift"), encoding: .utf8)
-    try (production + "\n" + matchingTests).write(to: matchingSource, atomically: true, encoding: .utf8)
+    try (production + "\n" + matchingTests + "\n" + workflowTests).write(to: matchingSource, atomically: true, encoding: .utf8)
     let matchingBinary = temporary.appendingPathComponent("matching-tests")
     let matchingCompile = try execute(URL(fileURLWithPath: "/usr/bin/xcrun"), [
         "swiftc", "-D", "TESTING", "-module-cache-path", temporary.appendingPathComponent("cache").path,

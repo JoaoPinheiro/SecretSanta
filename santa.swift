@@ -1,14 +1,37 @@
 #!/usr/bin/env swift
 import Foundation
 
-// Annual configuration. Saving a new draw requires explicit confirmation.
-let drawYear = 2026
-let senderEmail = "secret-santa@example.com" // Replace with the dedicated Apple Mail address.
-let eventNote = "Please keep your assignment secret!"
+// Local configuration lives beside the script; see templates/config.json.
+struct Configuration: Codable {
+    let drawYear: Int
+    let senderEmail: String
+    let eventNote: String
+    let subjectTemplate: String
+    let bodyTemplate: String
 
-func emailSubject(year: Int) -> String { "Secret Santa — \(year)" }
-func emailBody(giver: String, recipient: String) -> String {
-    "Hi \(giver),\n\nThis year, you’re buying a gift for \(recipient).\n\n\(eventNote)\n"
+    static func load(at directory: URL) throws -> Configuration {
+        let url = directory.appendingPathComponent("config.json")
+        let config: Configuration
+        do { config = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: url)) }
+        catch { throw InputError("config.json: Cannot load configuration: \(error). Copy templates/config.json and customize it.") }
+        guard (1000...9999).contains(config.drawYear) else { throw InputError("config.json: drawYear must be a four-digit calendar year.") }
+        guard !config.subjectTemplate.isEmpty, config.bodyTemplate.contains("{recipient}") else {
+            throw InputError("config.json: subjectTemplate is required and bodyTemplate must contain {recipient}.")
+        }
+        return config
+    }
+
+    func render(_ template: String, giver: String = "", recipient: String = "") -> String {
+        // Replace tokens in a single pass so names cannot introduce template substitutions.
+        let values = ["{year}": String(drawYear), "{giver}": giver, "{recipient}": recipient, "{eventNote}": eventNote]
+        let pattern = try! NSRegularExpression(pattern: #"\{(?:year|giver|recipient|eventNote)\}"#)
+        var result = template
+        for match in pattern.matches(in: template, range: NSRange(template.startIndex..., in: template)).reversed() {
+            let range = Range(match.range, in: result)!
+            result.replaceSubrange(range, with: values[String(result[range])]!)
+        }
+        return result
+    }
 }
 
 struct InputError: Error, CustomStringConvertible {
@@ -83,7 +106,9 @@ struct AppleMailSender {
     }
 }
 
-func prepareEmails(people: [Person], history: History, year: Int, sender: String) throws -> [PreparedEmail] {
+func prepareEmails(people: [Person], history: History, config: Configuration) throws -> [PreparedEmail] {
+    let year = config.drawYear
+    let sender = config.senderEmail
     try validateHistory(history, personIDs: Set(people.map(\.id)))
     guard let draw = history[String(year)] else {
         throw InputError("No saved draw for \(year). Generate and save it before preparing emails.")
@@ -103,7 +128,8 @@ func prepareEmails(people: [Person], history: History, year: Int, sender: String
         }
         let recipient = contacts[draw.assignments[giver]!]!
         return PreparedEmail(giverID: giver, sender: sender, address: person.email,
-                             subject: emailSubject(year: year), body: emailBody(giver: person.name, recipient: recipient.name))
+                             subject: config.render(config.subjectTemplate, giver: person.name, recipient: recipient.name),
+                             body: config.render(config.bodyTemplate, giver: person.name, recipient: recipient.name))
     }
 }
 
@@ -129,7 +155,7 @@ func askYesNo(_ prompt: String) -> Bool {
     return answer == "y" || answer == "yes"
 }
 
-func runSending(at directory: URL, year: Int, sender: String,
+func runSending(at directory: URL, config: Configuration,
                 submit: (PreparedEmail) throws -> Void,
                 checkSender: () throws -> Void = {},
                 confirm: (String) -> Bool = askYesNo,
@@ -137,21 +163,24 @@ func runSending(at directory: URL, year: Int, sender: String,
     let people = try loadPeople(at: directory, requireActiveEmails: false)
     let url = directory.appendingPathComponent("history.json")
     let history = try loadHistory(from: url, personIDs: Set(people.map(\.id)))
-    let messages = try prepareEmails(people: people, history: history, year: year, sender: sender)
+    let messages = try prepareEmails(people: people, history: history, config: config)
     guard !messages.isEmpty else {
-        output("All messages for \(year) are already recorded as submitted. Nothing to send.")
+        output("All messages for \(config.drawYear) are already recorded as submitted. Nothing to send.")
+        return
+    }
+    let names = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0.name) })
+    output("\(messages.count) assignment emails are ready to send to:")
+    for message in messages { output("- \(names[message.giverID]!)") }
+    output("")
+    guard confirm("Send these emails from \(config.senderEmail)? [y/N]") else {
+        output("Sending cancelled. Matches remain saved; no emails sent.")
         return
     }
     try checkSender()
-    output("Sender: \(sender)\nPending messages: \(messages.count)")
-    for message in messages {
-        output("\nTo: \(message.address)\nSubject: \(message.subject)")
+    try submitEmails(messages, history: history, year: config.drawYear, to: url) { message in
+        try submit(message)
+        output("Submitted email to \(names[message.giverID]!).")
     }
-    guard confirm("Send these \(messages.count) messages from \(sender)? [y/N]") else {
-        output("Sending cancelled. No emails sent.")
-        return
-    }
-    try submitEmails(messages, history: history, year: year, to: url, submit: submit)
     output("Recorded \(messages.count) submissions. Submission does not confirm delivery.")
 }
 
@@ -513,70 +542,79 @@ func loadInputs(at directory: URL) throws -> ([Person], [GroupMembership], [Hist
     return (people, memberships, history)
 }
 
-func main() throws {
-    let arguments = Array(CommandLine.arguments.dropFirst())
-    guard arguments.isEmpty || arguments == ["--send"] || arguments == ["--show-matches"] else {
-        throw InputError("Usage: swift santa.swift [--send | --show-matches]")
+struct Options {
+    let showMatches: Bool
+    let noEmail: Bool
+    let regenerateMatches: Bool
+
+    init(_ arguments: [String]) throws {
+        let supported: Set<String> = ["--show-matches", "--no-email", "--regenerate-matches"]
+        guard Set(arguments).isSubset(of: supported) else {
+            throw InputError("Usage: swift santa.swift [--show-matches] [--no-email] [--regenerate-matches]")
+        }
+        showMatches = arguments.contains("--show-matches")
+        noEmail = arguments.contains("--no-email")
+        regenerateMatches = arguments.contains("--regenerate-matches")
     }
-    let directory = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
-    if arguments == ["--send"] {
-        let mail = AppleMailSender(scriptURL: directory.appendingPathComponent("send.applescript"))
-        try runSending(at: directory, year: drawYear, sender: senderEmail,
-                       submit: mail.submit, checkSender: { try mail.check(sender: senderEmail) })
-        return
-    }
+}
+
+func run(at directory: URL, options: Options,
+         submit: (PreparedEmail) throws -> Void,
+         checkSender: (String) throws -> Void,
+         confirm: (String) -> Bool = askYesNo,
+         output: (String) -> Void = { print($0) }) throws {
+    let config = try Configuration.load(at: directory)
+    let year = String(config.drawYear)
     let (people, memberships, imports) = try loadInputs(at: directory)
     let personIDs = Set(people.map(\.id))
     let historyURL = directory.appendingPathComponent("history.json")
     let saved = try loadHistory(from: historyURL, personIDs: personIDs)
-    let history = try mergeHistory(imports, into: saved, personIDs: personIDs)
-    let year = String(drawYear)
-    if let existing = saved[year], history[year] != existing {
-        throw InputError("A draw already exists for \(drawYear); importing changes to it is not allowed.")
+    // Regeneration explicitly replaces the target year, including target-year CSV imports.
+    let applicableImports = options.regenerateMatches ? imports.filter { $0.year != config.drawYear } : imports
+    var history = try mergeHistory(applicableImports, into: saved, personIDs: personIDs)
+    if !options.regenerateMatches, let existing = saved[year], history[year] != existing {
+        throw InputError("A draw already exists for \(config.drawYear); importing changes to it is not allowed.")
     }
-    let changed = try saveHistory(history, replacing: saved, to: historyURL)
     let active = people.filter(\.active)
-    print("Inputs valid: \(people.count) people, \(active.count) active, \(Set(memberships.map(\.group)).count) exclusion groups.")
-    print("Active participants: \(active.map { "\($0.name)" }.joined(separator: ", "))")
-    if history.isEmpty { print("No historical participation supplied.") }
-    for year in history.keys.sorted() {
-        let record = history[year]!
-        print("\(year): \(record.participants.count) participants, \(record.assignments.count) assignments.")
+    output("Inputs valid: \(people.count) people, \(active.count) active, \(Set(memberships.map(\.group)).count) exclusion groups.")
+    if history[year] == nil || options.regenerateMatches {
+        let participants = active.map(\.id)
+        guard participants.count >= 3 else { throw InputError("At least three active participants are required.") }
+        let restrictions = try drawRestrictions(participants: participants, memberships: memberships,
+                                                history: history, year: config.drawYear)
+        var random = SystemRandomNumberGenerator()
+        guard let assignments = findAssignments(eligible: restrictions.eligible, using: &random).assignments else {
+            throw InputError("No valid draw exists for these participants and restrictions.")
+        }
+        try validateAssignments(assignments, participants: participants, memberships: memberships,
+                                history: history, year: config.drawYear)
+        history[year] = AnnualHistory(participants: participants, assignments: assignments)
+        output("\(options.regenerateMatches ? "Regenerated" : "Generated") \(assignments.count) matches for \(config.drawYear).")
+    } else {
+        output("Using \(history[year]!.assignments.count) saved matches for \(config.drawYear).")
     }
-    print(changed ? "Imported history saved to history.json." : "History unchanged.")
-    let names = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0.name) })
-    func showAssignments(_ assignments: [String: String]) {
-        guard arguments == ["--show-matches"] else { return }
-        for giver in assignments.keys.sorted() {
-            let recipient = assignments[giver]!
-            print("\(names[giver]!) → \(names[recipient]!)")
+    try validateHistory(history, personIDs: personIDs)
+    let changed = try saveHistory(history, replacing: saved, to: historyURL)
+    output(changed ? "History saved to history.json." : "History unchanged.")
+    if options.showMatches {
+        let names = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0.name) })
+        for giver in history[year]!.assignments.keys.sorted() {
+            output("\(names[giver]!) → \(names[history[year]!.assignments[giver]!]!)")
         }
     }
-    if let existing = history[year] {
-        print("A draw already exists for \(drawYear); no new matches generated.")
-        showAssignments(existing.assignments)
+    if options.noEmail {
+        output("Sending disabled. Matches saved to history.json.")
         return
     }
-    let participants = active.map(\.id)
-    guard participants.count >= 3 else { throw InputError("At least three active participants are required.") }
-    let restrictions = try drawRestrictions(participants: participants, memberships: memberships, history: history, year: drawYear)
-    var random = SystemRandomNumberGenerator()
-    guard let assignments = findAssignments(eligible: restrictions.eligible, using: &random).assignments else {
-        throw InputError("No valid draw exists for these participants and restrictions.")
-    }
-    try validateAssignments(assignments, participants: participants, memberships: memberships,
-                            history: history, year: drawYear)
-    print("Draw generated for \(drawYear).")
-    showAssignments(assignments)
-    guard askYesNo("Save this draw for \(drawYear)? [y/N]") else {
-        print("New matches were not saved. No emails sent.")
-        return
-    }
-    var updated = history
-    updated[year] = AnnualHistory(participants: participants, assignments: assignments)
-    try validateHistory(updated, personIDs: personIDs)
-    _ = try saveHistory(updated, replacing: history, to: historyURL)
-    print("Draw for \(drawYear) saved to history.json. No emails sent.")
+    try runSending(at: directory, config: config, submit: submit,
+                   checkSender: { try checkSender(config.senderEmail) }, confirm: confirm, output: output)
+}
+
+func main() throws {
+    let options = try Options(Array(CommandLine.arguments.dropFirst()))
+    let directory = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
+    let mail = AppleMailSender(scriptURL: directory.appendingPathComponent("send.applescript"))
+    try run(at: directory, options: options, submit: mail.submit, checkSender: mail.check)
 }
 
 #if !TESTING

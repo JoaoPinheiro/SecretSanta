@@ -1,0 +1,15 @@
+# Local configuration and participant data
+/config.json
+/people.csv
+/groups.csv
+/history.csv
+
+# Saved assignments and submission progress
+/history.json
+/history.json.bak
+
+# macOS and Swift build artifacts
+.DS_Store
+.build/
+.swiftpm/
+/santa

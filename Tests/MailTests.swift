@@ -8,6 +8,11 @@ func runMailTests() throws {
     let historyURL = temporary.appendingPathComponent("history.json")
     let dedicatedSender = "santa@example.com"
     let year = 2023
+    func configuration(sender: String = "santa@example.com") -> Configuration {
+        Configuration(drawYear: year, senderEmail: sender, eventNote: "Keep it secret!",
+                      subjectTemplate: "Secret Santa — {year}",
+                      bodyTemplate: "Hi {giver},\nThis year, you’re buying a gift for {recipient}.\n{eventNote}")
+    }
     func expect(_ condition: Bool, _ message: String) throws {
         if !condition { throw InputError(message) }
     }
@@ -41,7 +46,7 @@ func runMailTests() throws {
     }
     func messages(sender: String = "santa@example.com") throws -> [PreparedEmail] {
         try prepareEmails(people: loadPeople(at: temporary, requireActiveEmails: false),
-                          history: history(), year: year, sender: sender)
+                          history: history(), config: configuration(sender: sender))
     }
     var count = 0
     func test(_ name: String, _ body: () throws -> Void) throws {
@@ -72,49 +77,50 @@ func runMailTests() throws {
         let pending = try messages()
         try expect(pending[0].address == "new@example.com" && pending[0].body.contains("Hi Blair Updated,"), "Current contact was ignored.")
     }
-    try test("failed account check stops before confirmation or submission") {
+    try test("account check follows confirmation and failure prevents submission") {
         let before = try Data(contentsOf: historyURL)
-        var confirmationRequested = false
         var called = false
+        var confirmed = false
         try rejects("Account unavailable") {
-            try runSending(at: temporary, year: year, sender: dedicatedSender,
-                           submit: { _ in called = true }, checkSender: { throw InputError("Account unavailable") },
-                           confirm: { _ in confirmationRequested = true; return true }, output: { _ in })
+            try runSending(at: temporary, config: configuration(),
+                           submit: { _ in called = true }, checkSender: {
+                               try expect(confirmed, "Account checked before confirmation.")
+                               throw InputError("Account unavailable")
+                           },
+                           confirm: { _ in confirmed = true; return true }, output: { _ in })
         }
-        try expect(!confirmationRequested && !called, "Failed account check continued sending.")
+        try expect(confirmed && !called, "Missing confirmation or failed account check continued sending.")
         try expect(Data(contentsOf: historyURL) == before, "Account check changed history.")
     }
-    try test("preview and decline never invoke sender or change history") {
+    try test("declining never checks Mail, submits or changes saved history") {
         let before = try Data(contentsOf: historyURL)
-        var called = false
-        try runSending(at: temporary, year: year, sender: dedicatedSender,
-                       submit: { _ in called = true }, confirm: { _ in false }, output: { _ in })
-        try expect(!called, "Declined sending called sender.")
-        try expect(Data(contentsOf: historyURL) == before, "Preview or decline changed history.")
+        var submitted = false
+        var preview: [String] = []
+        var prompted = false
+        try runSending(at: temporary, config: configuration(), submit: { _ in submitted = true },
+                       checkSender: { throw InputError("Declining must not contact Mail.") },
+                       confirm: { prompt in
+                           prompted = prompt == "Send these emails from santa@example.com? [y/N]"
+                               && preview == ["2 assignment emails are ready to send to:", "- Blair", "- Casey", ""]
+                           return false
+                       }, output: { preview.append($0) })
+        try expect(prompted && !submitted, "Missing preview/confirmation or sent after decline.")
+        try expect(Data(contentsOf: historyURL) == before, "Declining changed saved history.")
     }
-    try test("confirmation follows previews; progress saves after each submission") {
+    try test("confirmed sending saves each submission and skips completed reruns") {
         var output: [String] = []
         var submitted: [PreparedEmail] = []
-        var confirmed = false
-        try runSending(at: temporary, year: year, sender: dedicatedSender, submit: { message in
-            try expect(confirmed, "Sender ran without confirmation.")
+        try runSending(at: temporary, config: configuration(), submit: { message in
             let progress = try history()[String(year)]!.submittedEmails
             try expect(Set(progress) == Set(["alex"] + submitted.map(\.giverID)), "Previous success not saved before next send.")
             submitted.append(message)
-        }, confirm: { prompt in
-            confirmed = prompt.contains(dedicatedSender) && prompt.contains("2 messages")
-                && output.contains { $0.contains("To: blair@example.com") }
-                && output.contains { $0.contains("To: casey@example.com") }
-            return confirmed
-        }, output: { output.append($0) })
+        }, confirm: { _ in true }, output: { output.append($0) })
         try expect(submitted.map(\.giverID) == ["blair", "casey"], "Wrong batch submitted.")
-        for message in submitted {
-            try expect(!message.body.isEmpty, "Submitted email has no body.")
-            try expect(!output.joined(separator: "\n").contains(message.body), "Send preview revealed an email body.")
-        }
+        try expect(output.contains("Submitted email to Blair."), "Missing recipient name.")
+        try expect(!output.joined().contains("Subject:") && !output.joined().contains("gift for"), "Output exposed email details.")
         try expect(Set(try history()[String(year)]!.submittedEmails) == Set(["alex", "blair", "casey"]), "Submissions not recorded.")
         var rerunCalls = 0
-        try runSending(at: temporary, year: year, sender: dedicatedSender,
+        try runSending(at: temporary, config: configuration(),
                        submit: { _ in rerunCalls += 1 }, confirm: { _ in true }, output: { _ in })
         try expect(rerunCalls == 0, "Rerun duplicated a submission.")
     }
@@ -123,7 +129,7 @@ func runMailTests() throws {
         let before = try Data(contentsOf: historyURL)
         var calls = 0
         try rejects("needs a valid email address") {
-            try runSending(at: temporary, year: year, sender: dedicatedSender,
+            try runSending(at: temporary, config: configuration(),
                            submit: { _ in calls += 1 }, confirm: { _ in true }, output: { _ in })
         }
         try expect(calls == 0 && Data(contentsOf: historyURL) == before, "Invalid batch submitted or changed history.")
@@ -135,7 +141,7 @@ func runMailTests() throws {
         try write(saved)
         var calls: [String] = []
         try rejects("Check Mail before retrying") {
-            try runSending(at: temporary, year: year, sender: dedicatedSender, submit: { message in
+            try runSending(at: temporary, config: configuration(), submit: { message in
                 calls.append(message.giverID)
                 if calls.count == 2 { throw InputError("Simulated submission failure") }
             }, confirm: { _ in true }, output: { _ in })
@@ -149,7 +155,7 @@ func runMailTests() throws {
         try fm.createDirectory(at: historyURL.appendingPathExtension("bak"), withIntermediateDirectories: false)
         var calls = 0
         try rejects("Check Mail before retrying") {
-            try runSending(at: temporary, year: year, sender: dedicatedSender,
+            try runSending(at: temporary, config: configuration(),
                            submit: { _ in calls += 1 }, confirm: { _ in true }, output: { _ in })
         }
         try expect(calls == 1, "Batch continued after progress-save failure.")
