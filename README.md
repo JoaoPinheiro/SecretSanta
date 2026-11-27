@@ -34,17 +34,17 @@ either direction. If there are no exclusions, keep `groups.csv` with just its
 header. Each imported historical year must be complete: every participant gives
 and receives exactly once, and all IDs must exist in `people.csv`.
 
-Configure all five fields in `config.json`:
+Configure all four fields in `config.json`:
 
 - `drawYear`: a four-digit integer specifying the year to generate, reuse,
   regenerate, and send.
 - `senderEmail`: replace `secret-santa@example.com` with an address belonging
   to exactly one enabled Apple Mail account before sending.
-- `eventNote`: event details included by the default body template.
 - `subjectTemplate` and `bodyTemplate`: email wording. Supported placeholders are
-  `{year}`, `{giver}`, `{recipient}`, and `{eventNote}`. Both templates receive
+  `{year}`, `{giver}`, and `{recipient}`. Both templates receive
   these values. The subject must be nonempty and the body must contain
-  `{recipient}`. JSON uses `\n` for a newline.
+  `{recipient}`. Include event details directly in `bodyTemplate`. JSON uses
+  `\n` for a newline.
 
 Local configuration, participant CSVs, generated history, and backups are
 ignored by Git. Templates and test fixtures remain tracked.

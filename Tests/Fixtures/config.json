@@ -1,7 +1,6 @@
 {
   "drawYear": 2026,
   "senderEmail": "secret-santa@example.com",
-  "eventNote": "Please keep your assignment secret!",
   "subjectTemplate": "Secret Santa — {year}",
-  "bodyTemplate": "Hi {giver},\n\nThis year, you’re buying a gift for {recipient}.\n\n{eventNote}\n"
+  "bodyTemplate": "Hi {giver},\n\nThis year, you’re buying a gift for {recipient}.\n"
 }

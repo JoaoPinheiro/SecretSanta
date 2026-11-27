@@ -31,10 +31,10 @@ func runWorkflowTests() throws {
     try expect(submissions == 6 && confirmations == 1, "No-sending submitted or prompted.")
     print("PASS: no-email skips Mail checks, confirmation and submission")
 
-    let config = Configuration(drawYear: 2028, senderEmail: "santa@example.com", eventNote: "Note {giver}",
-                               subjectTemplate: "Gifts {year}", bodyTemplate: "Hi {giver}: {recipient}. {eventNote}")
+    let config = Configuration(drawYear: 2028, senderEmail: "santa@example.com",
+                               subjectTemplate: "Gifts {year}", bodyTemplate: "Hi {giver}: {recipient}.")
     try expect(config.render(config.subjectTemplate) == "Gifts 2028", "Subject configuration ignored.")
-    try expect(config.render(config.bodyTemplate, giver: "Zoë {recipient}", recipient: "李") == "Hi Zoë {recipient}: 李. Note {giver}",
+    try expect(config.render(config.bodyTemplate, giver: "Zoë {recipient}", recipient: "李") == "Hi Zoë {recipient}: 李.",
                "Template expansion corrupted Unicode or interpreted substitutions recursively.")
     print("PASS: configured templates preserve literal names and Unicode")
     print("3 workflow tests passed.")

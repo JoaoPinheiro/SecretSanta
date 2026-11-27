@@ -9,9 +9,9 @@ func runMailTests() throws {
     let dedicatedSender = "santa@example.com"
     let year = 2023
     func configuration(sender: String = "santa@example.com") -> Configuration {
-        Configuration(drawYear: year, senderEmail: sender, eventNote: "Keep it secret!",
+        Configuration(drawYear: year, senderEmail: sender,
                       subjectTemplate: "Secret Santa — {year}",
-                      bodyTemplate: "Hi {giver},\nThis year, you’re buying a gift for {recipient}.\n{eventNote}")
+                      bodyTemplate: "Hi {giver},\nThis year, you’re buying a gift for {recipient}.\nKeep it secret!")
     }
     func expect(_ condition: Bool, _ message: String) throws {
         if !condition { throw InputError(message) }

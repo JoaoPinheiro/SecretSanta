@@ -5,7 +5,6 @@ import Foundation
 struct Configuration: Codable {
     let drawYear: Int
     let senderEmail: String
-    let eventNote: String
     let subjectTemplate: String
     let bodyTemplate: String
 
@@ -23,8 +22,8 @@ struct Configuration: Codable {
 
     func render(_ template: String, giver: String = "", recipient: String = "") -> String {
         // Replace tokens in a single pass so names cannot introduce template substitutions.
-        let values = ["{year}": String(drawYear), "{giver}": giver, "{recipient}": recipient, "{eventNote}": eventNote]
-        let pattern = try! NSRegularExpression(pattern: #"\{(?:year|giver|recipient|eventNote)\}"#)
+        let values = ["{year}": String(drawYear), "{giver}": giver, "{recipient}": recipient]
+        let pattern = try! NSRegularExpression(pattern: #"\{(?:year|giver|recipient)\}"#)
         var result = template
         for match in pattern.matches(in: template, range: NSRange(template.startIndex..., in: template)).reversed() {
             let range = Range(match.range, in: result)!
